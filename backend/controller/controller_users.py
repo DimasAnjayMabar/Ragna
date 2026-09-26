@@ -15,7 +15,7 @@ from validation.users import (
     ChangeEmailSchema
 )
 from middleware.auth import get_current_session
-from models import UserAuth
+from migrate_here.models import UserAuth
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["Users"])

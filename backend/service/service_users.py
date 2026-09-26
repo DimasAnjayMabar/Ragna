@@ -8,7 +8,7 @@ import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from passlib.context import CryptContext
-from models import User, UserAuth, OTPRegistrasi, OTPResetPassword, OTPChangeEmail
+from migrate_here.models import User, UserAuth, OTPRegistrasi, OTPResetPassword, OTPChangeEmail
 from validation.users import (
     RegisterSchema,
     LoginSchema,

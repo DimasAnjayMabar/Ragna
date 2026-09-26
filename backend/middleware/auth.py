@@ -3,7 +3,7 @@
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from database import get_db
-from models import UserAuth, User
+from migrate_here.models import UserAuth, User
 from datetime import datetime
 
 

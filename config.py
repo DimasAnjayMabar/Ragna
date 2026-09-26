@@ -79,23 +79,64 @@ def _apply_device_config():
     CONFIG["reranker_device"]  = "cuda" if has_cuda else "cpu"
     CONFIG["nlp_device"]       = 0 if has_cuda else -1
 
-# Change your Groq desired models here
-GROQ_ALLOWED_MODELS = {
-    "llama-3.1-8b-instant",
-    "llama-3.3-70b-versatile",
-    "openai/gpt-oss-20b",
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-safeguard-20b",     # Pengganti llama-4-scout
-    "qwen/qwen3.6-27b",                  # Pengganti qwen/qwen3-32b
+# =============================================================================
+# GROQ MODEL REGISTRY — SATU-SATUNYA SOURCE OF TRUTH
+# =============================================================================
+# Semua info per model (nama, provider, tier, deskripsi, TPS, TPM limit)
+# HANYA didefinisikan di sini. pipeline.py (via GROQ_ALLOWED_MODELS /
+# GROQ_MODEL_TPM_LIMITS / list_local_models) dan controller_chats.py
+# (via _get_model_metadata) sama-sama membaca dict ini secara dinamis —
+# jadi mengganti model Groq cukup edit/replace blok ini SEKALI di sini
+# (bisa juga otomatis lewat tool change_groq_llm_model.go, tombol "Apply").
+# TPS dari official Groq docs — https://console.groq.com/docs/models
+GROQ_MODEL_REGISTRY = {
+    "llama-3.1-8b-instant": {
+        "name": "Llama 3.1 · 8B",
+        "provider": "Meta via Groq",
+        "tier": "small",
+        "description": "Tercepat (560 t/s). Cocok untuk pertanyaan sederhana dan cepat.",
+        "tps": 560,
+        "tpm_limit": 6000,
+    },
+    "llama-3.3-70b-versatile": {
+        "name": "Llama 3.3 · 70B",
+        "provider": "Meta via Groq",
+        "tier": "large",
+        "description": "Model terbaik untuk jawaban kompleks (280 t/s). Rekomendasi utama.",
+        "tps": 280,
+        "tpm_limit": 300000,
+    },
+    "openai/gpt-oss-20b": {
+        "name": "GPT OSS · 20B",
+        "provider": "OpenAI via Groq",
+        "tier": "medium",
+        "description": "Open-weight OpenAI, sangat cepat (1000 t/s). Reasoning baik.",
+        "tps": 1000,
+        "tpm_limit": 6000,
+    },
+    "qwen/qwen3.6-27b": {
+        "name": "Qwen 3.6 · 27B",
+        "provider": "Alibaba via Groq",
+        "tier": "large",
+        "description": "Model reasoning terbaru (500 t/s). [Preview]",
+        "tps": 500,
+        "tpm_limit": 6000,
+    },
+    "openai/gpt-oss-120b": {
+        "name": "GPT OSS · 120B",
+        "provider": "OpenAI via Groq",
+        "tier": "large",
+        "description": "Open-weight OpenAI terbesar (500 t/s).",
+        "tps": 500,
+        "tpm_limit": 6000,
+    },
 }
 
+
+# Diturunkan otomatis dari GROQ_MODEL_REGISTRY — JANGAN diedit manual.
+GROQ_ALLOWED_MODELS = set(GROQ_MODEL_REGISTRY.keys())
 GROQ_MODEL_TPM_LIMITS = {
-    "llama-3.1-8b-instant":                        6_000,
-    "openai/gpt-oss-20b":                          6_000,
-    "openai/gpt-oss-safeguard-20b":                6_000,   # Pengganti llama-4-scout
-    "qwen/qwen3.6-27b":                            6_000,   # Pengganti qwen/qwen3-32b
-    "llama-3.3-70b-versatile":                     300_000,
-    "openai/gpt-oss-120b":                         6_000,
+    model_id: meta["tpm_limit"] for model_id, meta in GROQ_MODEL_REGISTRY.items()
 }
 
 GROQ_MODEL_SAFE_TOKEN_BUDGET = {
@@ -145,49 +186,19 @@ def set_groq_model(model_id: str) -> None:
     _apply_token_budget(safe_budget)
 
 def list_local_models(model_dir: str = None) -> list:
+    """
+    Dibangun dinamis dari GROQ_MODEL_REGISTRY — TIDAK ada lagi daftar statis
+    yang perlu diketik ulang tiap kali Groq mengganti model.
+    """
     return [
         {
-            "id":          "llama-3.1-8b-instant",
-            "name":        "Llama 3.1 · 8B",
-            "provider":    "Meta via Groq",
-            "tier":        "small",
-            "description": "Tercepat (560 t/s). Tidak cocok untuk RAG — TPM limit 6K di free tier.",
-        },
-        {
-            "id":          "openai/gpt-oss-20b",
-            "name":        "GPT OSS · 20B",
-            "provider":    "OpenAI via Groq",
-            "tier":        "medium",
-            "description": "Open-weight OpenAI, sangat cepat (1000 t/s).",
-        },
-        {
-            "id":          "openai/gpt-oss-safeguard-20b",
-            "name":        "GPT OSS Safeguard · 20B",
-            "provider":    "OpenAI via Groq",
-            "tier":        "medium",
-            "description": "Versi safeguard dari GPT-OSS 20B (1000 t/s). [Preview]",
-        },
-        {
-            "id":          "qwen/qwen3.6-27b",
-            "name":        "Qwen 3.6 · 27B",
-            "provider":    "Alibaba via Groq",
-            "tier":        "large",
-            "description": "Model reasoning terbaru (500 t/s). [Preview]",
-        },
-        {
-            "id":          "llama-3.3-70b-versatile",
-            "name":        "Llama 3.3 · 70B",
-            "provider":    "Meta via Groq",
-            "tier":        "large",
-            "description": "Rekomendasi utama. 300K TPM — aman untuk semua fitur (280 t/s).",
-        },
-        {
-            "id":          "openai/gpt-oss-120b",
-            "name":        "GPT OSS · 120B",
-            "provider":    "OpenAI via Groq",
-            "tier":        "large",
-            "description": "Open-weight OpenAI terbesar (500 t/s).",
-        },
+            "id":          model_id,
+            "name":        meta.get("name", model_id),
+            "provider":    meta.get("provider", "Groq"),
+            "tier":        meta.get("tier", "medium"),
+            "description": meta.get("description", f"Model {model_id}"),
+        }
+        for model_id, meta in sorted(GROQ_MODEL_REGISTRY.items())
     ]
 
 # =============================================================================

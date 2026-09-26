@@ -5,3 +5,4 @@ MAIL_PORT=587
 MAIL_USERNAME= your mail server username
 MAIL_PASSWORD= your mail server password
 MAIL_FROM= your main email (ex: noreply@gmail.com)
+HF_TOKEN="your hugging face key"

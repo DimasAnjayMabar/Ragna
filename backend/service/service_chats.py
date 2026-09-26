@@ -7,7 +7,7 @@ from datetime import datetime
 import time
 import logging
 from fastapi import HTTPException, status
-from models import Chat, ChatDetail, PipelineLog, Documents
+from migrate_here.models import Chat, ChatDetail, PipelineLog, Documents
 import hashlib
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -288,7 +288,7 @@ def _rag_worker(
     db: Session = db_factory()
     stop_event = _get_stop_event(detail_id)
     try:
-        from models import User
+        from backend.migrate_here.models import User
         user      = db.query(User).filter(User.id == user_id).first()
         user_name = user.name if user else None
 
@@ -735,7 +735,7 @@ def _embed_and_commit(
         # ── Embedding sukses → simpan hash ke DB ──────────────────────────────
         db = db_factory()
         try:
-            from models import Documents
+            from backend.migrate_here.models import Documents
             doc = Documents(hash_value=file_hash)
             db.add(doc)
             db.commit()
@@ -867,11 +867,11 @@ class KnowledgeService:
 
         # ── Pilih target func berdasarkan embedder_type ───────────────────────
         if embedder_type == "raw":
-            from embedder import run_pipeline_with_shared_resources_raw
+            from embed_knowledge_base_here.embedder import run_pipeline_with_shared_resources_raw
             target_func = run_pipeline_with_shared_resources_raw
             log_prefix = "RAW"
         else:
-            from embedder import run_pipeline_with_shared_resources
+            from embed_knowledge_base_here.embedder import run_pipeline_with_shared_resources
             target_func = run_pipeline_with_shared_resources
             log_prefix = "IMPROVED"
 

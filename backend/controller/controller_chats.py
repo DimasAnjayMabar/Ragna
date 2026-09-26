@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db, SessionLocal
 from middleware.auth import get_current_session
-from models import UserAuth, ChatDetail, Chat
+from migrate_here.models import UserAuth, ChatDetail, Chat
 from service.service_chats import ChatService, KnowledgeService, _get_or_create_event, _cleanup_event, _signal_stop
 from validation.chats import (
     RenameTitleSchema,
@@ -27,7 +27,7 @@ from validation.chats import (
 )
 
 # ── IMPORT CONFIG ──────────────────────────────────────────────────────────────
-from config import CONFIG, GROQ_ALLOWED_MODELS, GROQ_MODEL_TPM_LIMITS
+from config import CONFIG, GROQ_ALLOWED_MODELS, GROQ_MODEL_TPM_LIMITS, GROQ_MODEL_REGISTRY
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Chats"])
@@ -84,71 +84,23 @@ def _sse_heartbeat() -> str:
 
 def _get_model_metadata() -> dict:
     """
-    Bangun metadata model dari GROQ_ALLOWED_MODELS di config.py.
-    Ini adalah source of truth untuk semua model.
+    Bangun metadata model dari GROQ_MODEL_REGISTRY di config.py.
+    GROQ_MODEL_REGISTRY adalah SATU-SATUNYA source of truth untuk semua
+    model (nama, provider, tier, deskripsi, TPS, TPM limit) — tidak ada
+    lagi duplikasi TPS_MAP/METADATA di file ini. Mengganti model Groq
+    cukup edit config.py sekali (manual atau lewat tool "Apply").
     """
-    # TPS dari official Groq docs
-    # Source: https://console.groq.com/docs/models
-    TPS_MAP = {
-        "llama-3.1-8b-instant": 560,
-        "llama-3.3-70b-versatile": 280,
-        "openai/gpt-oss-20b": 1000,
-        "openai/gpt-oss-safeguard-20b": 1000,
-        "qwen/qwen3.6-27b": 500,
-        "openai/gpt-oss-120b": 500,
-    }
-    
-    # Metadata lengkap per model
-    METADATA = {
-        "llama-3.1-8b-instant": {
-            "name": "Llama 3.1 · 8B",
-            "provider": "Meta via Groq",
-            "tier": "small",
-            "description": "Tercepat (560 t/s). Cocok untuk pertanyaan sederhana dan cepat.",
-        },
-        "llama-3.3-70b-versatile": {
-            "name": "Llama 3.3 · 70B",
-            "provider": "Meta via Groq",
-            "tier": "large",
-            "description": "Model terbaik untuk jawaban kompleks (280 t/s). Rekomendasi utama.",
-        },
-        "openai/gpt-oss-20b": {
-            "name": "GPT OSS · 20B",
-            "provider": "OpenAI via Groq",
-            "tier": "medium",
-            "description": "Open-weight OpenAI, sangat cepat (1000 t/s). Reasoning baik.",
-        },
-        "openai/gpt-oss-safeguard-20b": {
-            "name": "GPT OSS Safeguard · 20B",
-            "provider": "OpenAI via Groq",
-            "tier": "medium",
-            "description": "Versi safeguard dari GPT-OSS 20B (1000 t/s). [Preview]",
-        },
-        "qwen/qwen3.6-27b": {
-            "name": "Qwen 3.6 · 27B",
-            "provider": "Alibaba via Groq",
-            "tier": "large",
-            "description": "Model reasoning terbaru (500 t/s). [Preview]",
-        },
-        "openai/gpt-oss-120b": {
-            "name": "GPT OSS · 120B",
-            "provider": "OpenAI via Groq",
-            "tier": "large",
-            "description": "Open-weight OpenAI terbesar (500 t/s).",
-        },
-    }
-    
     models = []
     for model_id in sorted(GROQ_ALLOWED_MODELS):
-        meta = METADATA.get(model_id, {})
+        meta = GROQ_MODEL_REGISTRY.get(model_id, {})
         models.append({
             "id": model_id,
             "name": meta.get("name", model_id.split('/')[-1].replace('-', ' ').title()),
             "provider": meta.get("provider", "Groq"),
             "tier": meta.get("tier", "medium"),
             "description": meta.get("description", f"Model {model_id}"),
-            "tps": TPS_MAP.get(model_id, 100),
-            "tpm_limit": GROQ_MODEL_TPM_LIMITS.get(model_id, 6000),
+            "tps": meta.get("tps", 100),
+            "tpm_limit": meta.get("tpm_limit", GROQ_MODEL_TPM_LIMITS.get(model_id, 6000)),
         })
     return models
 
