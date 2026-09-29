@@ -684,7 +684,59 @@ class ChatService:
 # KNOWLEDGE SERVICE — PDF Upload & Embedding
 # =============================================================================
 
-def _embed_and_commit(
+class _EmbedBatch:
+    """
+    Melacak satu request upload (bisa banyak file) sampai SEMUA thread embedding selesai.
+    Log ringkasan hanya ditulis satu kali, setelah:
+      - semua file di request sudah didaftarkan (seal), dan
+      - semua thread yang dijalankan sudah selesai (sukses / duplikat / error).
+    """
+
+    def __init__(self, log_prefix: str):
+        self.log_prefix = log_prefix
+        self._lock      = threading.Lock()
+        self._pending   = 0
+        self._sealed    = False
+        self._logged    = False
+        self._counts    = {"success": 0, "duplicate": 0, "error": 0}
+        self._started   = time.time()
+
+    def add(self) -> None:
+        with self._lock:
+            self._pending += 1
+
+    def seal(self) -> None:
+        with self._lock:
+            self._sealed = True
+            self._log_if_finished()
+
+    def mark_done(self, outcome: str) -> None:
+        with self._lock:
+            self._counts[outcome] = self._counts.get(outcome, 0) + 1
+            self._pending -= 1
+            self._log_if_finished()
+
+    def _log_if_finished(self) -> None:  # dipanggil saat lock dipegang
+        if self._logged or not self._sealed or self._pending > 0:
+            return
+        self._logged = True
+        c     = self._counts
+        total = sum(c.values())
+        if total == 0:
+            return  # semua file ditolak (mis. duplikat) — tidak ada yang di-embed
+        elapsed = time.time() - self._started
+        msg = (
+            f"[KnowledgeEmbed-{self.log_prefix}] SELESAI: semua file dalam request sudah "
+            f"diproses → total={total}  sukses={c['success']}  "
+            f"duplikat={c['duplicate']}  gagal={c['error']}  durasi={elapsed:.1f}s"
+        )
+        if c["error"]:
+            logger.warning(msg)
+        else:
+            logger.info(msg)
+
+
+def _embed_and_commit_impl(
     saved_path:      str,
     jurnal_metadata: dict,
     file_hash:       str,
@@ -692,7 +744,7 @@ def _embed_and_commit(
     db_factory,                  # callable → SQLAlchemy Session
     target_func,                 # run_pipeline_with_shared_resources atau _raw
     log_prefix:      str,
-) -> None:
+) -> str:
     """
     Background thread: jalankan embedder lalu — hanya jika berhasil —
     commit hash ke tabel Documents.
@@ -767,6 +819,20 @@ def _embed_and_commit(
             )
     # has_error=True → file sengaja dipertahankan, tidak ada aksi tambahan
 
+    if result is not None:
+        return "success"
+    return "error" if has_error else "duplicate"
+
+
+def _embed_and_commit(*args, batch: "_EmbedBatch | None" = None) -> None:
+    """Wrapper thread: jalankan _embed_and_commit_impl lalu laporkan hasilnya ke batch."""
+    outcome = "error"
+    try:
+        outcome = _embed_and_commit_impl(*args)
+    finally:
+        if batch is not None:
+            batch.mark_done(outcome)
+
 
 # service_chats.py - Perbaikan bagian KnowledgeService
 # service_chats.py - Perbaikan method upload_pdf
@@ -801,6 +867,7 @@ class KnowledgeService:
         tahun:      str | None = None,
         user_id:    int | None = None,
         embedder_type: str = "improved",
+        batch: "_EmbedBatch | None" = None,
     ) -> dict:
         """
         Simpan PDF lalu jalankan embedder di background thread.
@@ -882,10 +949,18 @@ class KnowledgeService:
         t = threading.Thread(
             target=_embed_and_commit,
             args=(str(dest_path), jurnal_metadata, file_hash, dest_path, SessionLocal, target_func, log_prefix),
+            kwargs={"batch": batch},
             daemon=True,
             name=f"embed-{log_prefix.lower()}-{safe_name}",
         )
-        t.start()
+        if batch is not None:
+            batch.add()
+        try:
+            t.start()
+        except Exception:
+            if batch is not None:
+                batch.mark_done("error")
+            raise
         logger.info(
             f"[KnowledgeUpload] Embedder ({embedder_type}) dimulai di background → "
             f"file={safe_name}  thread={t.name}"
@@ -901,3 +976,40 @@ class KnowledgeService:
             "status":          "processing",
             "embedder_type":   embedder_type,
         }
+
+    @staticmethod
+    def upload_pdf_batch(
+        files: list,                 # list of (file_bytes, filename)
+        db: Session,
+        judul:    str | None = None,   # hanya dipakai jika request berisi 1 file
+        penulis:  str | None = None,
+        tahun:    str | None = None,
+        user_id:  int | None = None,
+        embedder_type: str = "improved",
+    ) -> dict:
+        """
+        Upload banyak PDF dalam SATU request. Log "SELESAI" ditulis sekali,
+        setelah semua file selesai di-embed (lihat _EmbedBatch).
+        File duplikat (409) tidak menjalankan thread dan dicatat di 'rejected'.
+        """
+        batch    = _EmbedBatch("RAW" if embedder_type == "raw" else "IMPROVED")
+        accepted = []
+        rejected = []
+        try:
+            for file_bytes, filename in files:
+                try:
+                    accepted.append(KnowledgeService.upload_pdf(
+                        file_bytes=file_bytes, filename=filename, db=db,
+                        judul=judul if len(files) == 1 else None,
+                        penulis=penulis, tahun=tahun, user_id=user_id,
+                        embedder_type=embedder_type, batch=batch,
+                    ))
+                except HTTPException as exc:
+                    rejected.append({"filename": filename, "status_code": exc.status_code, "detail": exc.detail})
+        finally:
+            batch.seal()  # setelah ini log SELESAI muncul begitu thread terakhir rampung
+
+        logger.info(
+            f"[KnowledgeUpload] Batch diterima → diproses={len(accepted)}  ditolak={len(rejected)}"
+        )
+        return {"files": accepted, "rejected": rejected, "status": "processing"}

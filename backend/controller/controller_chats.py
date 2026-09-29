@@ -538,8 +538,9 @@ def stop_generation(
 
 @router.post("/knowledge/upload", status_code=status.HTTP_202_ACCEPTED)
 async def upload_knowledge_pdf(
-    file: UploadFile = File(...),
-    judul: str | None = Form(default=None),
+    file: UploadFile | None = File(default=None),          # kompatibel dengan klien lama (1 file)
+    files: list[UploadFile] | None = File(default=None),   # baru: banyak file dalam 1 request
+    judul: str | None = Form(default=None),                # hanya dipakai jika request berisi 1 file
     penulis: str | None = Form(default=None),
     tahun: str | None = Form(default=None),
     embedder_type: str = Form(default="improved"),
@@ -552,48 +553,74 @@ async def upload_knowledge_pdf(
             detail="Parameter 'embedder_type' harus 'improved' atau 'raw'.",
         )
 
-    if file.content_type not in ("application/pdf", "application/octet-stream"):
+    incoming: list[UploadFile] = list(files or [])
+    if file is not None:
+        incoming.append(file)
+    if not incoming:
         raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Hanya file PDF yang diperbolehkan.",
-        )
-
-    if not (file.filename or "").lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Ekstensi file harus .pdf",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Minimal satu file PDF harus diupload.",
         )
 
     MAX_SIZE = 50 * 1024 * 1024
-    file_bytes = await file.read()
-    if len(file_bytes) > MAX_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="Ukuran file melebihi batas 50 MB.",
-        )
-    if len(file_bytes) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File PDF kosong.",
-        )
+    valid: list[tuple[bytes, str]] = []
+    rejected: list[dict] = []
+
+    def _reject(name: str, code: int, detail: str):
+        rejected.append({"filename": name, "status_code": code, "detail": detail})
+
+    # Validasi per file: file yang tidak valid ditolak sendiri-sendiri,
+    # file lain dalam request yang sama tetap diproses.
+    for f in incoming:
+        name = f.filename or "upload.pdf"
+        if f.content_type not in ("application/pdf", "application/octet-stream"):
+            _reject(name, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Hanya file PDF yang diperbolehkan.")
+            continue
+        if not name.lower().endswith(".pdf"):
+            _reject(name, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Ekstensi file harus .pdf")
+            continue
+        data = await f.read()
+        if len(data) > MAX_SIZE:
+            _reject(name, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Ukuran file melebihi batas 50 MB.")
+            continue
+        if len(data) == 0:
+            _reject(name, status.HTTP_400_BAD_REQUEST, "File PDF kosong.")
+            continue
+        valid.append((data, name))
+
+    if not valid:
+        # Tidak ada file valid → perilaku sama seperti sebelumnya (error dari file pertama)
+        raise HTTPException(status_code=rejected[0]["status_code"], detail=rejected[0]["detail"])
 
     try:
-        result = KnowledgeService.upload_pdf(
-            file_bytes    = file_bytes,
-            filename      = file.filename or "upload.pdf",
+        result = KnowledgeService.upload_pdf_batch(
+            files         = valid,
+            db            = db,
             judul         = judul,
             penulis       = penulis,
             tahun         = tahun,
             user_id       = current_session.user_id,
             embedder_type = embedder_type,
-            db = db
         )
+        rejected.extend(result["rejected"])
+        accepted = result["files"]
+
+        if not accepted:
+            # Semua file ditolak (mis. duplikat) → error dari file pertama
+            raise HTTPException(status_code=rejected[0]["status_code"], detail=rejected[0]["detail"])
+
+        single = len(incoming) == 1
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={
                 "success": True,
-                "message": "PDF diterima dan sedang diproses ke knowledge base.",
-                "data":    result,
+                "message": (
+                    "PDF diterima dan sedang diproses ke knowledge base."
+                    if single else
+                    f"{len(accepted)} PDF diterima dan sedang diproses ke knowledge base."
+                ),
+                # 1 file → bentuk lama (dict). Banyak file → daftar + yang ditolak.
+                "data": accepted[0] if single else {"files": accepted, "rejected": rejected},
             },
         )
     except HTTPException as e:

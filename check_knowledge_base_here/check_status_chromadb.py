@@ -1,7 +1,7 @@
 # check_status.py
 import chromadb
 
-client = chromadb.PersistentClient(path="./chroma_db")
+client = chromadb.PersistentClient(path="../chroma_db")
 
 print("=" * 50)
 print("STATUS COLLECTIONS")

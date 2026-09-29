@@ -576,6 +576,140 @@ def run_pipeline(pdf_path: str,
     }
 
 # =============================================================================
+# CHROMADB INGESTOR — RAW (tanpa heading detection & Neo4j)
+# =============================================================================
+
+def is_file_processed_raw(chroma_client, file_hash: str) -> bool:
+    """Cek apakah file dengan hash tertentu sudah ada di collection konten_isi_raw."""
+    try:
+        col = chroma_client.get_or_create_collection(RAW_COLLECTION)
+        results = col.get(where={"file_hash": file_hash}, limit=1, include=[])
+        return len(results["ids"]) > 0
+    except Exception:
+        return False
+
+
+class ChromaIngestorRaw:
+    """
+    ChromaDB ingestion untuk mode RAW (tanpa Neo4j, tanpa heading detection).
+    Collection : konten_isi_raw
+    Embedding  : teks chunk murni (tanpa prefix judul/sub_judul)
+    Metadata   : {file_hash, jurnal_id, chunk_index, source_file}
+    """
+
+    def __init__(self, persist_directory: str = CHROMA_PATH, chroma_client=None):
+        # Jika client dipinjam dari pipeline singleton, pakai langsung
+        # (hindari error "An instance of Chroma already exists with different settings").
+        if chroma_client is not None:
+            self.client = chroma_client
+        else:
+            self.client = chromadb.PersistentClient(path=persist_directory)
+        self.collection = self.client.get_or_create_collection(
+            name=RAW_COLLECTION,
+            metadata={"description": "Embeddings raw — flat chunks tanpa heading/Neo4j"}
+        )
+
+    def ingest_chunks(self, chunks: List[str], file_hash: str, jurnal_id: str,
+                      source_file: str, rag_models: RAGModels):
+        if not chunks:
+            return
+
+        ids = [
+            str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{jurnal_id}:raw:{i}"))
+            for i in range(len(chunks))
+        ]
+        embeddings = rag_models.embed_batch_safe(chunks)
+        metadatas = [
+            {
+                "file_hash":   file_hash,
+                "jurnal_id":   jurnal_id,
+                "chunk_index": i,
+                "source_file": source_file,
+            }
+            for i in range(len(chunks))
+        ]
+
+        self.collection.add(
+            ids=ids,
+            documents=chunks,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
+        logger.info("ChromaDB (raw): %d chunks ingested ke '%s'", len(chunks), RAW_COLLECTION)
+
+
+def run_pipeline_raw(pdf_path: str,
+                     jurnal_metadata: Dict,
+                     rag_models: RAGModels,
+                     chroma_raw: ChromaIngestorRaw) -> Optional[Dict]:
+    """
+    Pipeline RAW: PDF -> 2-column detection -> boilerplate removal
+                  -> flat chunking -> embed -> konten_isi_raw
+    Return None jika file duplikat (hash sudah ada) atau tidak ada konten.
+    """
+    logger.info("[RAW] Processing: %s", pdf_path)
+
+    file_hash = calculate_file_hash(pdf_path)
+    if is_file_processed_raw(chroma_raw.client, file_hash):
+        logger.warning("[RAW] File hash %s sudah diproses. Melewati...", file_hash[:8])
+        return None
+
+    lines = parse_pdf_to_lines(pdf_path)
+    lines = clean_lines(lines)
+    if not lines:
+        logger.warning("[RAW] Tidak ada konten setelah cleaning — pipeline berhenti.")
+        return None
+
+    full_text = " ".join(l["text"] for l in lines)
+    chunks = split_text_word_safe(full_text, MAX_TOKENS_PER_CHUNK)
+
+    jurnal_id = str(uuid.uuid4())
+    chroma_raw.ingest_chunks(
+        chunks=chunks,
+        file_hash=file_hash,
+        jurnal_id=jurnal_id,
+        source_file=pdf_path,
+        rag_models=rag_models,
+    )
+
+    return {
+        "jurnal_id":   jurnal_id,
+        "source_file": pdf_path,
+        "stats": {"total_lines": len(lines), "total_chunks": len(chunks)},
+    }
+
+
+# =============================================================================
+# ENTRY POINT UNTUK SERVICE BACKEND (dipanggil dari service_chats.py)
+# =============================================================================
+
+def run_pipeline_with_shared_resources(pdf_path: str,
+                                       jurnal_metadata: Dict) -> Optional[Dict]:
+    """Mode IMPROVED (Neo4j + ChromaDB). Meminjam RAGModels dari singleton pipeline."""
+    from pipeline import get_rag_pipeline
+
+    pipeline = get_rag_pipeline()
+    rag_models = pipeline.models
+
+    neo4j = Neo4jIngestor(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD)
+    chroma = ChromaIngestor(persist_directory=CHROMA_PATH)
+    try:
+        return run_pipeline(pdf_path, jurnal_metadata, rag_models, neo4j, chroma)
+    finally:
+        neo4j.close()
+
+
+def run_pipeline_with_shared_resources_raw(pdf_path: str,
+                                           jurnal_metadata: Dict) -> Optional[Dict]:
+    """Mode RAW (ChromaDB only). Memakai client ChromaDB dari singleton pipeline."""
+    from pipeline import get_rag_pipeline
+
+    pipeline = get_rag_pipeline()
+    rag_models = pipeline.models
+    chroma_raw = ChromaIngestorRaw(chroma_client=pipeline.chroma.client)
+    return run_pipeline_raw(pdf_path, jurnal_metadata, rag_models, chroma_raw)
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
