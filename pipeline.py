@@ -3,6 +3,7 @@ import queue as _queue
 import logging
 import threading
 import time
+import re
 from typing import List, Dict, Optional, Generator
 from dataclasses import dataclass
 
@@ -91,16 +92,51 @@ def _setup_logger() -> logging.Logger:
 log = _setup_logger()
 
 ############################################################
+# PROMPT INJECTION SCANNER
+############################################################
+
+_INSTRUCTION_CACHE: Dict[str, List[Dict]] = {}
+_INSTRUCTION_CACHE_LOCK = threading.Lock()
+_COMPILED_PATTERN_CACHE: Dict[str, re.Pattern] = {}
+_RISK_WEIGHT = {"high": 1.0, "medium": 0.7, "low": 0.4}
+
+
+def _get_compiled_pattern(pattern: str) -> re.Pattern:
+    """Pre-compile regex — cache agar tidak compile ulang tiap query."""
+    if pattern not in _COMPILED_PATTERN_CACHE:
+        try:
+            _COMPILED_PATTERN_CACHE[pattern] = re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            # Pattern invalid → compile pattern yang tidak pernah match
+            _COMPILED_PATTERN_CACHE[pattern] = re.compile(r"(?!x)x")
+    return _COMPILED_PATTERN_CACHE[pattern]
+
+
+def invalidate_instruction_cache(lang: Optional[str] = None):
+    """
+    Paksa refresh cache instruction set.
+    Panggil ini setelah prompt_guard.py selesai embed instruction baru,
+    agar scanner memakai pattern terbaru.
+    """
+    with _INSTRUCTION_CACHE_LOCK:
+        if lang is None:
+            _INSTRUCTION_CACHE.clear()
+        else:
+            _INSTRUCTION_CACHE.pop(lang, None)
+    log.info("[InputGuard] Instruction cache di-invalidate (lang=%s)", lang or "all")
+
+
+############################################################
 # DATA STRUCTURES
 ############################################################
 
 @dataclass
 class CandidateChunk:
     """Hasil dari ChromaDB wide retrieval (Tahap 1)."""
-    isi_id:       str    # id Node Isi di Neo4j (kunci relasi)
-    jurnal_id:    str    # id Node Jurnal
-    konten_chunk: str    # teks chunk mentah
-    vector_score: float  # jarak kosinus ChromaDB (lebih kecil = lebih dekat)
+    isi_id:       str
+    jurnal_id:    str
+    konten_chunk: str
+    vector_score: float
 
 
 @dataclass
@@ -110,8 +146,8 @@ class EnrichedChunk:
     jurnal_id:     str
     sub_judul:     str
     halaman:       int
-    konten_chunk:  str    # teks chunk TARGET (murni)
-    context_text:  str    # prev + target + next (untuk reranking & LLM prompt)
+    konten_chunk:  str
+    context_text:  str
     judul_jurnal:  str
     doi:           str
     penulis:       str
@@ -123,14 +159,14 @@ class EnrichedChunk:
 @dataclass
 class RAGResponse:
     """Respons akhir pipeline."""
-    answer:          object          # Generator[str] untuk streaming
-    sources:         List[Dict]      # referensi untuk ditampilkan di UI
+    answer:          object
+    sources:         List[Dict]
     final_chunks:    List[EnrichedChunk]
     processing_time: float
-    retrieval_time: float = 0.0      # <- baru
-    enrichment_time: float = 0.0     # <- baru
-    rerank_time: float = 0.0         # <- baru
-    intent:          str = "knowledge"  # 'knowledge' | 'social'
+    retrieval_time:  float = 0.0
+    enrichment_time: float = 0.0
+    rerank_time:     float = 0.0
+    intent:          str = "knowledge"  # 'knowledge' | 'social' | 'blocked' | 'vision'
 
 
 ############################################################
@@ -141,8 +177,8 @@ class RAGModels:
     """
     Singleton — model lokal dimuat sekali saja.
 
-    Embedding + Reranker → GPU  (VRAM kini bebas karena LLM ada di Groq API)
-    LLM                  → Groq API  (openai/gpt-oss-120b, streaming SSE)
+    Embedding + Reranker → GPU
+    LLM                  → Groq API
 
     GROQ_API_KEY dibaca dari environment variable saat inisialisasi.
     """
@@ -153,6 +189,11 @@ class RAGModels:
     def reset(cls):
         """Paksa re-inisialisasi singleton — dipanggil saat module reload."""
         cls._instance = None
+        # BARU: invalidate instruction cache saat model di-reset
+        try:
+            invalidate_instruction_cache()
+        except Exception:
+            pass
 
     def __new__(cls):
         if cls._instance is None:
@@ -186,10 +227,6 @@ class RAGModels:
             CONFIG["embedding_model"],
             device=CONFIG["embedding_device"],
         )
-        # Lock melindungi embedding_model dari akses GPU bersamaan.
-        # RAG pipeline dan embedder PDF berbagi model yang sama —
-        # keduanya berjalan di background thread terpisah dan harus
-        # antri lewat lock ini sebelum memanggil .encode().
         self.embedding_lock = threading.Lock()
         log.info("[1/4] Embedding siap  (%.2fs)", time.perf_counter() - _t)
 
@@ -227,7 +264,7 @@ class RAGModels:
             model=CONFIG["nlp_id_model"],
             tokenizer=CONFIG["nlp_id_model"],
             device=CONFIG["nlp_device"],
-            top_k=5,  
+            top_k=5,
         )
 
         self.nlp_en_pipeline = hf_pipeline(
@@ -243,12 +280,7 @@ class RAGModels:
         log.info("✓ Semua model berhasil dimuat.")
 
     def get_embedding(self, text: str) -> List[float]:
-        """
-        Embed satu teks → vektor float (GPU, no_grad, thread-safe).
-
-        Menggunakan embedding_lock agar tidak bertabrakan dengan
-        embed_batch_safe() yang dipanggil embedder PDF di thread lain.
-        """
+        """Embed satu teks → vektor float (GPU, no_grad, thread-safe)."""
         with self.embedding_lock:
             with torch.no_grad():
                 return self.embedding_model.encode(
@@ -256,31 +288,18 @@ class RAGModels:
                 ).tolist()
 
     def embed_batch_safe(self, texts: List[str]) -> List[List[float]]:
-        """
-        Embed batch teks → list vektor float (GPU, no_grad, thread-safe).
-
-        Dipakai oleh embedder PDF saat ingest dokumen baru.
-        Berbagi embedding_lock dengan get_embedding() — keduanya
-        tidak akan menyentuh GPU bersamaan meski berjalan di thread berbeda.
-
-        Catatan: batch besar akan memegang lock lebih lama.
-        RAG query yang datang saat lock dipegang akan menunggu
-        sampai batch selesai — ini wajar dan by design.
-        """
+        """Embed batch teks → list vektor float (GPU, no_grad, thread-safe)."""
         with self.embedding_lock:
             with torch.no_grad():
                 embeddings = self.embedding_model.encode(
                     texts,
                     convert_to_tensor=False,
-                    show_progress_bar=False,  # nonaktifkan progress bar di server
+                    show_progress_bar=False,
                 )
                 return [e.tolist() for e in embeddings]
 
     def rerank(self, query: str, texts: List[str]) -> List[float]:
-        """
-        Cross-encoder scoring (query, teks) di GPU.
-        Return: list float — skor lebih tinggi = lebih relevan.
-        """
+        """Cross-encoder scoring (query, teks) di GPU."""
         if not texts:
             return []
         pairs = [[query, t] for t in texts]
@@ -299,7 +318,6 @@ class RAGModels:
         "jelaskan", "sebutkan", "coba", "tolong", "mohon",
     }
 
-    # Kosakata domain pertanian — TIDAK boleh dikoreksi meskipun OOV di BERT umum
     _DOMAIN_VOCAB = {
         "fusarium", "antraknosa", "nematoda", "aflatoksin", "alternaria",
         "pythium", "phytophthora", "rhizoctonia", "sclerotinia", "botrytis",
@@ -308,31 +326,12 @@ class RAGModels:
         "embun", "tepung", "karat", "virus", "bakteri", "jamur", "cendawan",
         "aphid", "thrips", "whitefly", "mealybug", "wereng", "penggerek",
         "ulat", "kutu", "tungau", "nematoda", "belalang", "lalat",
-        # nama tanaman domain
         "kentang", "tomat", "cabai", "jagung", "padi", "kedelai", "singkong",
         "ubi", "terong", "bawang", "wortel", "kubis", "selada", "kangkung",
     }
 
     def correct_typo_mlm(self, text: str) -> str:
-        """
-        Koreksi typo pada query Bahasa Indonesia menggunakan IndoBERT MLM.
-
-        Algoritma:
-          1. Tokenisasi tiap kata dengan IndoBERT tokenizer
-          2. Kata yang menghasilkan token [UNK] atau terpecah jadi ≥4 sub-kata
-             dianggap berpotensi typo (OOV = out-of-vocabulary)
-          3. Kata OOV yang BUKAN kosakata domain pertanian di-mask ([MASK])
-          4. IndoBERT fill-mask memprediksi kandidat pengganti berdasarkan konteks
-          5. Kandidat terbaik dipilih jika skornya ≥ threshold (0.15)
-             dan lebih panjang dari 2 karakter (hindari prediksi noise)
-          6. Hasil: query dengan kata typo sudah terkoreksi
-
-        Catatan:
-          - Kosakata domain pertanian (fusarium, antraknosa, dll) TIDAK dikoreksi
-            karena memang OOV di BERT generik tapi valid secara domain
-          - Threshold 0.15 cukup konservatif — hanya koreksi jika model yakin
-          - Jika fill-mask gagal atau kata tidak ada kandidat baik → kata asli dipertahankan
-        """
+        """Koreksi typo pada query Bahasa Indonesia menggunakan IndoBERT MLM."""
         words = text.split()
         corrected_words: list[str] = []
         any_corrected = False
@@ -340,26 +339,20 @@ class RAGModels:
         for word in words:
             word_lower = word.lower()
 
-            # Kata domain → skip koreksi
             if word_lower in self._DOMAIN_VOCAB:
                 corrected_words.append(word)
                 continue
 
-            # Cek apakah kata ini OOV di IndoBERT
             tokens = self.nlp_id_tokenizer.tokenize(word_lower)
             is_unk = "[UNK]" in tokens
-            # Wordpiece memecah kata asing menjadi banyak sub-kata
             is_heavily_split = len(tokens) >= 4 and all(
                 t.startswith("##") or len(t) <= 2 for t in tokens[1:]
             )
 
             if not (is_unk or is_heavily_split):
-                # Kata dikenal dengan baik → pertahankan
                 corrected_words.append(word)
                 continue
 
-            # Coba koreksi dengan fill-mask
-            # Ganti kata ini dengan [MASK] dalam kalimat penuh untuk konteks
             masked_sentence = " ".join(
                 "[MASK]" if w.lower() == word_lower else w
                 for w in words
@@ -371,7 +364,6 @@ class RAGModels:
                 for pred in predictions:
                     candidate = pred["token_str"].strip().lower()
                     score     = pred["score"]
-                    # Filter: skor cukup tinggi, bukan noise, bukan sama persis
                     if (score >= 0.15
                             and len(candidate) > 2
                             and candidate != word_lower):
@@ -399,16 +391,7 @@ class RAGModels:
         return corrected_text
 
     def extract_keywords_nlp(self, text: str, lang: str) -> str:
-        """
-        Ekstraksi keyword/entitas dari query menggunakan NLP:
-          - lang='id' → IndoBERT: tokenisasi sub-kata, ambil token unik
-                        non-stopword sebagai keyword tambahan.
-          - lang='en' → BERT-NER: ambil entitas yang dikenali sebagai
-                        keyword tambahan.
-
-        Return: string keyword yang digabung ke query asli sebelum embedding,
-                sehingga vektor lebih representatif terhadap entitas penting.
-        """
+        """Ekstraksi keyword/entitas dari query menggunakan NLP."""
         try:
             if lang == "id":
                 tokens = self.nlp_id_tokenizer.tokenize(text)
@@ -446,10 +429,7 @@ class RAGModels:
 ############################################################
 
 class ChromaRetriever:
-    """
-    Wide retrieval dari ChromaDB collection 'konten_isi'.
-    Metadata yang dikembalikan: isi_id (kunci ke Neo4j) + jurnal_id.
-    """
+    """Wide retrieval dari ChromaDB collection 'konten_isi'."""
 
     def __init__(self, persist_directory: str = CONFIG["chroma_path"]):
         log.info("ChromaDB: %s", persist_directory)
@@ -469,10 +449,7 @@ class ChromaRetriever:
         query_embedding: List[float],
         k: int = CONFIG["chroma_retrieval_k"],
     ) -> List[CandidateChunk]:
-        """
-        Cari k chunk paling mirip dengan query_embedding.
-        Return: list CandidateChunk, urut dari yang paling dekat.
-        """
+        """Cari k chunk paling mirip dengan query_embedding."""
         try:
             results = self.collection.query(
                 query_embeddings=[query_embedding],
@@ -509,17 +486,15 @@ class ChromaRetriever:
 ############################################################
 
 class Neo4jEnricher:
-    """
-    ... (docstring tidak berubah)
-    """
+    """Neo4j context enrichment (prev/next chunk window)."""
 
     def __init__(
         self,
         uri:      str = CONFIG["neo4j_uri"],
         user:     str = CONFIG["neo4j_user"],
         password: str = CONFIG["neo4j_password"],
-        max_wait_seconds: int = 300,   # nunggu maksimal 5 menit sebelum menyerah
-        retry_interval: int = 5,        # cek ulang tiap 5 detik
+        max_wait_seconds: int = 300,
+        retry_interval: int = 5,
     ):
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
 
@@ -546,39 +521,29 @@ class Neo4jEnricher:
 
     def close(self):
         self.driver.close()
+
     def enrich(
         self,
         candidates: List[CandidateChunk],
         context_window: int = CONFIG["context_window"],
     ) -> List[EnrichedChunk]:
-        """
-        Jalankan satu Cypher UNWIND untuk semua isi_id sekaligus.
-        Kembalikan list EnrichedChunk dengan context_text berisi
-        teks gabungan: [prev_chunks...] + target + [next_chunks...].
-        """
+        """Jalankan satu Cypher UNWIND untuk semua isi_id sekaligus."""
         if not candidates:
             return []
 
         isi_ids  = [c.isi_id for c in candidates]
         cand_map = {c.isi_id: c for c in candidates}
 
-        # Cypher: traverse mundur untuk prev, maju untuk next
-        # Variabel {cw} diganti dengan nilai context_window
         cypher = (
             "UNWIND $isi_ids AS target_id "
             "MATCH (isi:Isi {id: target_id}) "
             "MATCH (j:Jurnal)-[:HAS_SECTION]->(isi) "
-
-            # prev: node yang mengarah ke isi via NEXT (arah balik)
             "OPTIONAL MATCH (prev_isi:Isi)-[:NEXT*1..%(cw)d]->(isi) "
             "WITH isi, j, target_id, "
             "     collect(DISTINCT prev_isi.konten_chunk) AS prev_chunks "
-
-            # next: node yang isi arahkan via NEXT
             "OPTIONAL MATCH (isi)-[:NEXT*1..%(cw)d]->(next_isi:Isi) "
             "WITH isi, j, target_id, prev_chunks, "
             "     collect(DISTINCT next_isi.konten_chunk) AS next_chunks "
-
             "RETURN "
             "  target_id        AS isi_id, "
             "  j.id             AS jurnal_id, "
@@ -607,7 +572,6 @@ class Neo4jEnricher:
                     next_list = [t for t in (rec["next_chunks"] or []) if t]
                     target    = rec["konten_chunk"] or ""
 
-                    # Gabung: prev (urut maju) + target + next
                     context_text = " ".join([*prev_list, target, *next_list]).strip()
 
                     enriched.append(EnrichedChunk(
@@ -640,25 +604,7 @@ class Neo4jEnricher:
 
 class RAGPipeline:
     """
-    Orkestrasi dua pipeline terpisah:
-
-    ┌─────────────────────────────────────────────────────────┐
-    │  process_query()  ←  router via _detect_query_intent()  │
-    └───────────┬─────────────────────────┬───────────────────┘
-                │ intent='knowledge'       │ intent='social'
-                ▼                         ▼
-    process_knowledge_query()    process_social_query()
-      Tahap 1: ChromaDB            Prompt minimal → LLM
-      Tahap 2: Neo4j enrich        temperature=0.8 (natural)
-      Tahap 3: BGE reranking       max_new_tokens=128
-      Tahap 4: Filtering
-      Tahap 5: Memory inject (jika ada)
-      Tahap 6: LLM (temp=0.2)
-
-    Memory System:
-      - get_memory(chat_id, query) → similarity search Q&A pairs dari ChromaDB 'chat_memory'
-      - save_memory(chat_id, detail_id, question, answer) → simpan Q&A pair baru
-      Keduanya dipanggil dari service/chats.py — save via _save_memory_entry (thread daemon).
+    Orkestrasi dua pipeline terpisah dengan defense layer untuk prompt injection.
     """
 
     def __init__(self):
@@ -679,24 +625,15 @@ class RAGPipeline:
         chat_id:    int | None = None,
         stop_event: threading.Event = None,
         user_id:    int | None = None,
-        base64_image: str | None = None, # <--- TAMBAHAN ARGUMEN
+        base64_image: str | None = None,
     ) -> RAGResponse:
         """
-        Entry point utama. Deteksi intent lalu delegasikan ke pipeline
-        yang sesuai: knowledge → process_knowledge_query,
-                     social    → process_social_query.
+        Entry point utama. Deteksi intent lalu delegasikan ke pipeline yang sesuai.
 
-        Sebelum deteksi intent, query Bahasa Indonesia dikoreksi typo-nya
-        terlebih dahulu menggunakan IndoBERT MLM (fill-mask).
-
-        chat_id (opsional): diteruskan ke kedua pipeline untuk membaca
-        dan menyimpan memory. Social pipeline menggunakan memory untuk
-        mengingat informasi personal (nama, preferensi, dll).
-
-        user_id (opsional): id user yang sedang login. Digunakan untuk
-        mengambil identitas (nama, dll.) dari ChromaDB collection
-        'user_identity'. Identitas digabung ke blok memory — TIDAK
-        diinjek langsung ke base prompt.
+        Defense layer:
+          - Koreksi typo (IndoBERT MLM)
+          - Scan query terhadap instruction set graph (BARU)
+          - Scan di vision path jika ada base64_image (BARU)
         """
 
         if base64_image:
@@ -704,12 +641,12 @@ class RAGPipeline:
             log.info("[Vision RAG] Langkah 1: Menganalisis gambar menggunakan Gemini...")
             image_description = self._analyze_image(base64_image)
             log.info(f"[Vision RAG] Hasil Ekstraksi: {image_description[:100]}...")
-            
+
             # --- PERBAIKAN: CEGAH GROQ MENGANALISIS PESAN ERROR GEMINI ---
             if image_description.startswith("Gagal") or image_description.startswith("Gambar diterima"):
                 def error_stream():
                     yield f"⚠️ **Sistem Vision Error:**\n\n{image_description}\n\n_Tips: Ini biasanya terjadi karena batas limit API gratis per menit. Silakan tunggu sekitar 1 menit lalu coba kirim ulang gambar Anda._"
-                
+
                 return RAGResponse(
                     answer=error_stream(),
                     sources=[],
@@ -718,13 +655,33 @@ class RAGPipeline:
                     intent="vision_error"
                 )
             # --------------------------------------------------------------
-            
+
+            # ── BARU: Scan query text (bukan gambar) sebelum digabung ────
+            if query and query.strip():
+                _vlang = self._detect_language(query)
+                _vscan = self._scan_query(query, lang=_vlang)
+                if _vscan["is_suspicious"]:
+                    log.warning(
+                        "[InputGuard] Vision query ditolak — slot=%s patterns=%s risk=%.2f",
+                        _vscan["matched_slot"],
+                        _vscan["matched_patterns"][:5],
+                        _vscan["risk_score"],
+                    )
+                    return RAGResponse(
+                        answer=self._refuse_injection_stream("umum"),
+                        sources=[],
+                        final_chunks=[],
+                        processing_time=0.0,
+                        intent="blocked",
+                    )
+            # ──────────────────────────────────────────────────────────────
+
             # Jika sukses, gabungkan hasil analisa gambar dengan query asli
             if query.strip() and query.strip() != "Tolong jelaskan gambar tanaman ini.":
                 enriched_query = f"Pengguna mengunggah gambar dengan hasil analisis visi dari pakar berikut:\n'{image_description}'\n\nBerdasarkan analisis visual tersebut, pengguna bertanya: '{query}'. Tolong berikan jawaban yang komprehensif."
             else:
                 enriched_query = f"Pengguna mengunggah gambar dengan hasil analisis visi dari pakar berikut:\n'{image_description}'\n\nTolong jelaskan kondisi tanaman tersebut, kemungkinan penyebab, dan cara penanganannya."
-            
+
             log.info("[Vision RAG] Langkah 2: Mengirim gabungan teks ke pipeline Knowledge Retrieval...")
             return self.process_knowledge_query(enriched_query, chat_id=chat_id, stop_event=stop_event, user_id=user_id)
         # ----------------------------------------------
@@ -735,6 +692,24 @@ class RAGPipeline:
         if lang_pre == "id":
             query = self.models.correct_typo_mlm(query)
 
+        # ── BARU: Scan query terhadap instruction set graph ─────────────
+        scan_result = self._scan_query(query, lang=lang_pre)
+        if scan_result["is_suspicious"]:
+            log.warning(
+                "[InputGuard] Query ditolak — slot=%s patterns=%s risk=%.2f",
+                scan_result["matched_slot"],
+                scan_result["matched_patterns"][:5],
+                scan_result["risk_score"],
+            )
+            return RAGResponse(
+                answer=self._refuse_injection_stream("umum"),
+                sources=[],
+                final_chunks=[],
+                processing_time=0.0,
+                intent="blocked",
+            )
+        # ────────────────────────────────────────────────────────────────
+
         intent = self._detect_query_intent(query)
         log.info("Intent terdeteksi: %s — query=%r", intent, query[:80])
 
@@ -742,42 +717,129 @@ class RAGPipeline:
 
         if intent == "social":
             return self.process_social_query(query, chat_id=chat_id, stop_event=stop_event, user_id=user_id)
-        
+
         if rag_mode == "regular":
             log.info("[Router] Menggunakan Regular RAG pipeline")
             return self.process_regular_query(query, chat_id=chat_id, stop_event=stop_event, user_id=user_id)
-    
+
         return self.process_knowledge_query(query, chat_id=chat_id, stop_event=stop_event, user_id=user_id)
-    
+
+    # ── Scanner helpers ───────────────────────────────────────────────────────
+
+    def _get_cached_instructions(self, lang: str) -> List[Dict]:
+        """
+        Ambil instruction set dari Neo4j untuk bahasa tertentu.
+        Hasil di-cache di memory — hindari query Neo4j berulang.
+        """
+        with _INSTRUCTION_CACHE_LOCK:
+            if lang in _INSTRUCTION_CACHE:
+                return _INSTRUCTION_CACHE[lang]
+
+        try:
+            with self.neo4j.driver.session() as session:
+                result = session.run(
+                    """
+                    MATCH (i:Instruction {lang: $lang})
+                    RETURN i.slot               AS slot,
+                           i.forbidden_patterns AS patterns,
+                           i.risk_level         AS risk_level
+                    """,
+                    lang=lang,
+                ).data()
+            instructions = [
+                {
+                    "slot": r["slot"],
+                    "patterns": r["patterns"] or [],
+                    "risk_level": r["risk_level"] or "medium",
+                }
+                for r in result
+            ]
+            log.info(
+                "[InputGuard] Instruction set di-load untuk lang=%s (%d slot, %d pattern total)",
+                lang,
+                len(instructions),
+                sum(len(i["patterns"]) for i in instructions),
+            )
+        except Exception:
+            log.warning(
+                "[InputGuard] Gagal ambil instruction lang=%s — scan dilewati",
+                lang, exc_info=False,
+            )
+            instructions = []
+
+        with _INSTRUCTION_CACHE_LOCK:
+            _INSTRUCTION_CACHE[lang] = instructions
+        return instructions
+
+    def _scan_query(self, query: str, lang: str = "id") -> Dict:
+        """
+        Scan query user terhadap instruction set graph.
+
+        Return:
+            {
+                "is_suspicious": bool,
+                "matched_patterns": [str],
+                "risk_score": float,
+                "matched_slot": str | None,
+            }
+        """
+        instructions = self._get_cached_instructions(lang)
+
+        matched_patterns: List[str] = []
+        matched_slot: Optional[str] = None
+        max_risk = 0.0
+
+        for instr in instructions:
+            slot_weight = _RISK_WEIGHT.get(instr["risk_level"], 0.5)
+            for pattern in instr["patterns"]:
+                try:
+                    rx = _get_compiled_pattern(pattern)
+                    if rx.search(query):
+                        matched_patterns.append(pattern)
+                        if slot_weight > max_risk:
+                            max_risk = slot_weight
+                            matched_slot = instr["slot"]
+                except Exception:
+                    continue
+
+        return {
+            "is_suspicious": len(matched_patterns) > 0,
+            "matched_patterns": matched_patterns,
+            "risk_score": max_risk,
+            "matched_slot": matched_slot,
+        }
+
+    def _refuse_injection_stream(self, reason: str = "umum"):
+        """
+        Generator yang menolak query karena terdeteksi prompt injection.
+        Pesan sengaja umum — tidak mengungkap pattern yang match.
+        """
+        if reason == "social":
+            msg = (
+                "Maaf, saya tidak dapat memproses permintaan ini. "
+                "Silakan ajukan pertanyaan seputar penyakit dan hama tanaman."
+            )
+        else:
+            msg = (
+                "Maaf, saya tidak dapat memproses permintaan ini karena "
+                "terdeteksi pola yang tidak sesuai dengan pedoman saya. "
+                "Silakan ajukan pertanyaan seputar penyakit dan hama tanaman."
+            )
+
+        def _gen():
+            yield msg
+        return _gen()
 
     # ── Memory System ─────────────────────────────────────────────────────────
 
     def get_memory(self, chat_id: int, query: str, user_id: int | None = None) -> str | None:
-        """
-        Ambil hybrid memory dari ChromaDB collection 'chat_memory',
-        dan gabungkan dengan identitas user dari collection 'user_identity'
-        jika user_id disediakan.
-
-        Tiga blok digabungkan (jika tersedia):
-          0. Identitas user (identity_{user_id}) — dari collection terpisah.
-             Berisi nama user dan informasi persisten lintas topic.
-
-          1. Running summary (summary_{chat_id}) — konteks jangka panjang.
-             Berisi topik-topik yang sudah dibahas dan ringkasan percakapan.
-
-          2. Recent window (recent_{chat_id}_*) — N entry Q&A terbaru,
-             diambil kronologis TANPA similarity search. Menjawab pertanyaan
-             referensial temporal seperti "barusan", "tadi", "sebelumnya".
-
-        query tidak dipakai untuk filtering — disertakan hanya untuk
-        kompatibilitas signature dengan pemanggil di process_*_query.
-        """
+        """Ambil hybrid memory dari ChromaDB collection 'chat_memory'."""
         try:
             collection = self.chroma.client.get_or_create_collection(
                 CONFIG["memory_collection"]
             )
 
-            # ── Blok 0: Identitas user dari collection 'user_identity' ────────
+            # ── Blok 0: Identitas user ────────────────────────────────────────
             identity: str = ""
             if user_id is not None:
                 identity = self.get_identity(user_id) or ""
@@ -798,14 +860,9 @@ class RAGPipeline:
             except Exception:
                 log.debug("[Memory] Belum ada summary untuk chat_id=%d", chat_id)
 
-            # ── Blok 2: Recent window — N entry terbaru secara kronologis ─────
-            # Filter by id prefix 'recent_{chat_id}_' — lebih reliable daripada
-            # where filter karena tidak bergantung pada tipe data metadata di ChromaDB.
+            # ── Blok 2: Recent window ─────────────────────────────────────────
             recent_text: str = ""
             try:
-                # Ambil semua entry di collection, lalu filter manual by id prefix
-                # Ini menghindari masalah ChromaDB where filter dengan $and operator
-                # dan inkonsistensi tipe int vs string pada metadata chat_id
                 all_results = collection.get(include=["documents", "metadatas"])
 
                 prefix = f"recent_{chat_id}_"
@@ -820,13 +877,11 @@ class RAGPipeline:
                         matched_meta.append(all_results["metadatas"][i])
 
                 if matched_ids:
-                    # Urutkan berdasarkan timestamp ascending (terlama ke terbaru)
                     entries = sorted(
                         zip(matched_docs, matched_meta),
                         key=lambda x: x[1].get("timestamp", 0),
                     )
 
-                    # Ambil N terbaru sesuai config
                     n = CONFIG["memory_recent_window"]
                     entries = entries[-n:]
 
@@ -875,17 +930,7 @@ class RAGPipeline:
             return None
 
     def get_identity(self, user_id: int) -> str | None:
-        """
-        Ambil identitas user dari ChromaDB collection 'user_identity'.
-
-        Identitas berisi informasi persisten tentang user seperti nama
-        yang disimpan saat pertama kali chat. Berbeda dari chat_memory
-        yang terikat per chat_id, identity terikat per user_id sehingga
-        persisten lintas semua topic dan tidak ikut terhapus saat topic
-        dihapus.
-
-        Return: string teks identitas, atau None jika belum ada.
-        """
+        """Ambil identitas user dari ChromaDB collection 'user_identity'."""
         try:
             collection = self.chroma.client.get_or_create_collection(
                 CONFIG["identity_collection"]
@@ -911,21 +956,7 @@ class RAGPipeline:
             return None
 
     def save_identity(self, user_id: int, user_name: str) -> None:
-        """
-        Simpan atau perbarui identitas user di ChromaDB collection 'user_identity'.
-
-        Dipanggil dari chats.py (_rag_worker) setiap kali chat diproses,
-        sehingga jika nama user berubah di tabel users, identity di ChromaDB
-        ikut diperbarui. Operasi upsert — aman dipanggil berulang kali.
-
-        Format dokumen yang disimpan:
-          "Nama pengguna: {user_name}"
-        Format ini sengaja dibuat singkat dan mudah diparsing oleh LLM
-        ketika dibaca sebagai bagian dari blok memory.
-
-        user_id   : id integer dari tabel users (kunci lookup)
-        user_name : nama lengkap user dari tabel users
-        """
+        """Simpan atau perbarui identitas user di ChromaDB collection 'user_identity'."""
         if not user_name or not user_name.strip():
             log.debug("[Identity] user_name kosong — skip save user_id=%d", user_id)
             return
@@ -955,25 +986,7 @@ class RAGPipeline:
             )
 
     def save_memory(self, chat_id: int, detail_id: int, question: str, answer: str) -> None:
-        """
-        Simpan memory hybrid ke ChromaDB collection 'chat_memory'.
-
-        Dua operasi dijalankan dalam satu pemanggilan:
-
-          1. Update running summary (id tetap 'summary_{chat_id}').
-             Summary lama + Q&A baru dirangkum ulang oleh LLM.
-             Instruksi prioritas memaksa topik utama tidak pernah dihapus
-             meski terjadi kompresi.
-
-          2. Simpan entry episodik baru (id 'recent_{chat_id}_{detail_id}').
-             Format teks: "User: ...\nragna: ..."
-             Metadata: chat_id, detail_id, timestamp, type='recent'
-             Dipakai oleh get_memory() sebagai recent window kronologis.
-
-        Dipanggil oleh chats.py setelah response berhasil di-commit ke DB.
-        Identitas user (nama dll.) TIDAK disimpan di sini — gunakan
-        save_identity() secara terpisah di collection 'user_identity'.
-        """
+        """Simpan memory hybrid ke ChromaDB collection 'chat_memory'."""
         if not answer or not answer.strip():
             log.warning(
                 "[Memory] Answer kosong — skip save chat_id=%d detail_id=%d",
@@ -989,8 +1002,6 @@ class RAGPipeline:
             # ══════════════════════════════════════════════════════════════════
             # BAGIAN 1 — Update running summary
             # ══════════════════════════════════════════════════════════════════
-
-            # ── Ambil summary lama jika ada ───────────────────────────────────
             previous_summary: str = ""
             try:
                 existing = collection.get(
@@ -1000,13 +1011,12 @@ class RAGPipeline:
                 if existing["ids"]:
                     previous_summary = existing["documents"][0]
             except Exception:
-                pass  # Belum ada summary — mulai dari kosong
+                pass
 
             max_words = CONFIG["memory_summary_max_words"]
 
-            # Truncate agar total prompt summarizer tidak meledak
-            _max_answer_chars  = CONFIG["memory_summary_max_tokens"] * 3   # ~1536 char untuk 512 token
-            _max_summary_chars = CONFIG["memory_summary_max_tokens"] * 2   # ~1024 char
+            _max_answer_chars  = CONFIG["memory_summary_max_tokens"] * 3
+            _max_summary_chars = CONFIG["memory_summary_max_tokens"] * 2
             _max_question_chars = 400
 
             answer_trunc   = answer.strip()[:_max_answer_chars]
@@ -1027,15 +1037,13 @@ class RAGPipeline:
                     answer=answer_trunc,
                 )
 
-            # ── Panggil LLM untuk summarization ──────────────────────────────
             log.info(
                 "[Memory] Merangkum summary baru — chat_id=%d  detail_id=%d  "
                 "prev_summary=%d char",
                 chat_id, detail_id, len(previous_summary),
             )
-            # Summarizer ikut mode LLM yang aktif (groq atau local)
+
             if self.models.llm_mode == "groq":
-                # ── Groq API ──────────────────────────────────────────────────────
                 summary_response = self.models.groq_client.chat.completions.create(
                     model=CONFIG["memory_summary_model"],
                     messages=[{"role": "user", "content": summary_prompt}],
@@ -1044,8 +1052,6 @@ class RAGPipeline:
                 )
                 new_summary = summary_response.choices[0].message.content.strip()
             else:
-                # ── Local LLM ─────────────────────────────────────────────────────
-                # Kumpulkan seluruh token dari generator (summarizer tidak perlu streaming)
                 tokenizer = self.models.local_tokenizer
                 model     = self.models.local_llm
 
@@ -1066,11 +1072,9 @@ class RAGPipeline:
                         eos_token_id=tokenizer.eos_token_id,
                     )
 
-                # Potong token input — ambil hanya bagian yang di-generate
                 generated = output_ids[0][inputs.shape[-1]:]
                 new_summary = tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-            # ── Upsert summary ke ChromaDB (overwrite entry lama) ─────────────
             summary_embedding = self.models.get_embedding(new_summary)
             collection.upsert(
                 ids=[f"summary_{chat_id}"],
@@ -1115,10 +1119,10 @@ class RAGPipeline:
             log.exception(
                 "[Memory] Gagal update memory chat_id=%d detail_id=%d",
                 chat_id, detail_id,
-
             )
 
     # ── Social Pipeline ───────────────────────────────────────────────────────
+
     def process_social_query(
         self,
         query:      str,
@@ -1130,6 +1134,21 @@ class RAGPipeline:
         lang    = self._detect_language(query)
         tier    = self._get_model_tier()
 
+        # ── BARU: Defense-in-depth scan ─────────────────────────────────
+        scan_result = self._scan_query(query, lang=lang)
+        if scan_result["is_suspicious"]:
+            log.warning(
+                "[InputGuard] Social query ditolak — slot=%s patterns=%s",
+                scan_result["matched_slot"],
+                scan_result["matched_patterns"][:5],
+            )
+            return RAGResponse(
+                answer=self._refuse_injection_stream("social"),
+                sources=[], final_chunks=[],
+                processing_time=0.0, intent="blocked",
+            )
+        # ────────────────────────────────────────────────────────────────
+
         # ── Ambil memory + identitas user jika tersedia ───────────────────────
         memory_text: str | None = None
         if chat_id is not None:
@@ -1140,8 +1159,6 @@ class RAGPipeline:
                 log.debug("[Social] Belum ada memory untuk chat_id=%d", chat_id)
 
         # ── Pilih prompt berdasarkan tier model ───────────────────────────────
-        # large  → few-shot penuh (model besar mampu memisahkan contoh dari instruksi)
-        # medium / small → prompt ringkas (model kecil cenderung mereproduksi contoh)
         use_compact = tier in ("small", "medium")
 
         if lang == "id":
@@ -1201,22 +1218,7 @@ class RAGPipeline:
         stop_event: threading.Event = None,
         user_id:    int | None = None,
     ) -> RAGResponse:
-        """
-        Pipeline knowledge — WITH retrieval (6 tahap).
-        Tahap 1 → ChromaDB wide retrieval
-        Tahap 2 → Neo4j context enrichment
-        Tahap 3 → BGE reranking (GPU)
-        Tahap 4 → Filtering & diversifikasi sumber
-        Tahap 5 → Memory inject (identity + chat_memory dari ChromaDB)
-        Tahap 6 → LLM streaming generation (Groq API, temp=0.2)
-
-        chat_id digunakan di Tahap 5 untuk mengambil memory summary.
-        Jika None (misal dari simple_retrieval), memory dilewati.
-
-        user_id (opsional): digunakan di Tahap 5 agar get_memory() dapat
-        menyertakan identitas user (nama dll.) dari collection 'user_identity'.
-        Nama user TIDAK diinjek ke base prompt — hanya lewat blok memory.
-        """
+        """Pipeline knowledge — WITH retrieval (6 tahap)."""
         t_start = time.perf_counter()
         log.info("═" * 60)
         log.info("[Knowledge] Query: %r  chat_id=%s", query[:120], chat_id)
@@ -1224,6 +1226,22 @@ class RAGPipeline:
         # ── Deteksi bahasa & NLP keyword enrichment ───────────────────────────
         lang = self._detect_language(query)
         log.info("[Knowledge] Bahasa terdeteksi: %s", lang)
+
+        # ── BARU: Defense-in-depth scan ─────────────────────────────────
+        scan_result = self._scan_query(query, lang=lang)
+        if scan_result["is_suspicious"]:
+            log.warning(
+                "[InputGuard] Knowledge query ditolak — slot=%s patterns=%s risk=%.2f",
+                scan_result["matched_slot"],
+                scan_result["matched_patterns"][:5],
+                scan_result["risk_score"],
+            )
+            return RAGResponse(
+                answer=self._refuse_injection_stream("umum"),
+                sources=[], final_chunks=[],
+                processing_time=0.0, intent="blocked",
+            )
+        # ────────────────────────────────────────────────────────────────
 
         nlp_keywords = self.models.extract_keywords_nlp(query, lang)
         enriched_query = f"{query} {nlp_keywords}".strip() if nlp_keywords else query
@@ -1240,7 +1258,7 @@ class RAGPipeline:
         candidates = self.chroma.retrieve(query_emb, k=k)
 
         retrieval_elapsed = time.perf_counter() - t1_start
-        log.info("[Tahap 1] %d kandidat ditemukan  (%.3fs)", len(candidates), retrieval_elapsed)  # <-- FIX #1
+        log.info("[Tahap 1] %d kandidat ditemukan  (%.3fs)", len(candidates), retrieval_elapsed)
 
         if not candidates:
             log.warning("[Tahap 1] Tidak ada kandidat — pipeline berhenti.")
@@ -1249,7 +1267,7 @@ class RAGPipeline:
                 sources=[],
                 final_chunks=[],
                 processing_time=time.perf_counter() - t_start,
-                retrieval_time=retrieval_elapsed,           # <-- FIX (tambahan, early exit)
+                retrieval_time=retrieval_elapsed,
                 intent="knowledge",
             )
 
@@ -1265,7 +1283,7 @@ class RAGPipeline:
         enriched = self.neo4j.enrich(candidates, CONFIG["context_window"])
 
         enrichment_elapsed = time.perf_counter() - t2_start
-        log.info("[Tahap 2] %d chunk diperkaya  (%.3fs)", len(enriched), enrichment_elapsed)  # <-- FIX #2
+        log.info("[Tahap 2] %d chunk diperkaya  (%.3fs)", len(enriched), enrichment_elapsed)
 
         if not enriched:
             log.warning("[Tahap 2] Enrichment kosong — pipeline berhenti.")
@@ -1274,8 +1292,8 @@ class RAGPipeline:
                 sources=[],
                 final_chunks=[],
                 processing_time=time.perf_counter() - t_start,
-                retrieval_time=retrieval_elapsed,           # <-- FIX (tambahan, early exit)
-                enrichment_time=enrichment_elapsed,          # <-- FIX (tambahan, early exit)
+                retrieval_time=retrieval_elapsed,
+                enrichment_time=enrichment_elapsed,
                 intent="knowledge",
             )
 
@@ -1300,21 +1318,15 @@ class RAGPipeline:
         top_chunks = enriched[:reranked_k]
 
         rerank_elapsed = time.perf_counter() - t3_start
-        log.info(                                                                            # <-- FIX #3
+        log.info(
             "[Tahap 3] Top %d dipilih  (%.3fs)  skor: min=%.4f  max=%.4f",
             len(top_chunks), rerank_elapsed,
             min(c.rerank_score for c in top_chunks),
             max(c.rerank_score for c in top_chunks),
         )
 
-
         # ══════════════════════════════════════════════════════════════════════
         # TAHAP 4 — Filtering & Diversifikasi Sumber
-        #
-        # Strategi dua lapis:
-        #   a) max_chunks_per_jurnal — cegah satu jurnal mendominasi konteks
-        #   b) final_context_k       — batasi total chunk ke LLM agar prompt
-        #                              tidak melebihi context window
         # ══════════════════════════════════════════════════════════════════════
         max_per_j = CONFIG["max_chunks_per_jurnal"]
         final_k   = CONFIG["final_context_k"]
@@ -1341,12 +1353,6 @@ class RAGPipeline:
 
         # ══════════════════════════════════════════════════════════════════════
         # TAHAP 5 — Memory Inject
-        #
-        # Ambil hybrid memory dari ChromaDB:
-        #   - Identitas user (collection 'user_identity') via user_id
-        #   - Running summary + recent window (collection 'chat_memory') via chat_id
-        # Ketiganya digabung oleh get_memory() menjadi satu blok yang diinjek
-        # ke system prompt. Nama user TIDAK ada di base prompt — hanya di sini.
         # ══════════════════════════════════════════════════════════════════════
         memory_text: str | None = None
         if chat_id is not None:
@@ -1406,7 +1412,7 @@ class RAGPipeline:
             rerank_time=rerank_elapsed,
             intent="knowledge",
         )
-    
+
     def process_vision_query(
         self,
         query: str,
@@ -1419,10 +1425,26 @@ class RAGPipeline:
         log.info("═" * 60)
         log.info("[Vision] Memproses gambar dengan Gemini 3 Flash Preview...")
 
+        # ── BARU: Scan query text sebelum gambar ────────────────────────
+        if query and query.strip():
+            _vlang = self._detect_language(query)
+            _vscan = self._scan_query(query, lang=_vlang)
+            if _vscan["is_suspicious"]:
+                log.warning(
+                    "[InputGuard] Vision query ditolak — slot=%s patterns=%s",
+                    _vscan["matched_slot"], _vscan["matched_patterns"][:5],
+                )
+                return RAGResponse(
+                    answer=self._refuse_injection_stream("umum"),
+                    sources=[], final_chunks=[],
+                    processing_time=0.0, intent="blocked",
+                )
+        # ────────────────────────────────────────────────────────────────
+
         gemini_api_key = os.environ.get("GEMINI_API_KEY")
         if not gemini_api_key:
             raise EnvironmentError("GEMINI_API_KEY tidak ditemukan di file .env")
-        
+
         genai.configure(api_key=gemini_api_key)
         model = genai.GenerativeModel('gemini-3-flash-preview')
 
@@ -1454,7 +1476,7 @@ class RAGPipeline:
 
         return RAGResponse(
             answer=stream_generator(),
-            sources=[],       
+            sources=[],
             final_chunks=[],
             processing_time=elapsed,
             intent="vision",
@@ -1467,22 +1489,25 @@ class RAGPipeline:
         stop_event: threading.Event = None,
         user_id:    int | None = None,
     ) -> RAGResponse:
-        """
-        Regular RAG Pipeline:
-        Tahap 1: ChromaDB similarity search di raw collection
-        Tahap 2: BGE reranking
-        Tahap 3: Memory inject (opsional)
-        Tahap 4: LLM generation
-        
-        Perbedaan dengan Improved RAG:
-        - Tidak ada Neo4j context enrichment
-        - Tidak ada window prev/next chunks
-        - Tidak ada max_chunks_per_jurnal filtering
-        - Retrieval langsung dari raw_chunk tanpa metadata jurnal kompleks
-        """
+        """Regular RAG Pipeline (tanpa Neo4j enrichment)."""
         t_start = time.perf_counter()
         log.info("═" * 60)
         log.info("[RegularRAG] Query: %r  chat_id=%s", query[:120], chat_id)
+
+        # ── BARU: Defense-in-depth scan ─────────────────────────────────
+        _rlang = self._detect_language(query)
+        _rscan = self._scan_query(query, lang=_rlang)
+        if _rscan["is_suspicious"]:
+            log.warning(
+                "[InputGuard] Regular query ditolak — slot=%s patterns=%s",
+                _rscan["matched_slot"], _rscan["matched_patterns"][:5],
+            )
+            return RAGResponse(
+                answer=self._refuse_injection_stream("umum"),
+                sources=[], final_chunks=[],
+                processing_time=0.0, intent="blocked",
+            )
+        # ────────────────────────────────────────────────────────────────
 
         # ── Deteksi bahasa & NLP keyword enrichment ───────────────────────────
         lang = self._detect_language(query)
@@ -1517,14 +1542,14 @@ class RAGPipeline:
                     "vector_score": dist,
                 })
 
-        raw_retrieval_elapsed = time.perf_counter() - t1                                       # <-- FIX #4a
+        raw_retrieval_elapsed = time.perf_counter() - t1
         log.info("[RegularRAG Tahap 1] %d chunk ditemukan (%.3fs)", len(raw_chunks), raw_retrieval_elapsed)
 
         if not raw_chunks:
             return RAGResponse(
                 answer="Maaf, tidak menemukan informasi relevan di database.",
                 sources=[], final_chunks=[], processing_time=time.perf_counter() - t_start,
-                retrieval_time=raw_retrieval_elapsed,                                           # <-- FIX #4b
+                retrieval_time=raw_retrieval_elapsed,
                 intent="knowledge",
             )
 
@@ -1544,7 +1569,7 @@ class RAGPipeline:
         raw_chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
         top_chunks = raw_chunks[:reranked_k]
 
-        raw_rerank_elapsed = time.perf_counter() - t2                                           # <-- FIX #4c
+        raw_rerank_elapsed = time.perf_counter() - t2
         log.info("[RegularRAG Tahap 2] Top %d dipilih (%.3fs)", len(top_chunks), raw_rerank_elapsed)
 
         # ══════════════════════════════════════════════════════════════════════
@@ -1585,29 +1610,20 @@ class RAGPipeline:
             sources=sources,
             final_chunks=top_chunks,
             processing_time=elapsed,
-            retrieval_time=raw_retrieval_elapsed,        # <-- FIX #4d
-            enrichment_time=0.0,                          # <-- FIX #4e (Raw memang tidak enrich)
-            rerank_time=raw_rerank_elapsed,               # <-- FIX #4f
+            retrieval_time=raw_retrieval_elapsed,
+            enrichment_time=0.0,
+            rerank_time=raw_rerank_elapsed,
             intent="knowledge",
         )
-    
+
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     @staticmethod
     def _detect_query_intent(text: str) -> str:
-        """
-        Routing intent: 'knowledge' → RAG pipeline, 'social' → social pipeline.
-
-        Prioritas pengecekan:
-          1. Kata/frasa sosial ringan          → 'social'
-          2. Tanda tanya (?)                   → 'knowledge'
-          3. Kata tanya / perintah informatif  → 'knowledge'
-          4. Default                           → 'social'
-        """
+        """Routing intent: 'knowledge' → RAG pipeline, 'social' → social pipeline."""
         normalized = text.lower().strip()
         words      = set(normalized.split())
 
-        # ── 1. Social keywords (prioritas tertinggi) ──────────────────────────
         SOCIAL_PHRASES = {
             "apa kabar", "apakabar", "terima kasih", "terimakasih",
             "sampai jumpa", "selamat tinggal", "thank you",
@@ -1628,34 +1644,25 @@ class RAGPipeline:
             log.debug("[Intent] social — kata sosial terdeteksi")
             return "social"
 
-        # ── 2. Tanda tanya eksplisit ──────────────────────────────────────────
         if "?" in text:
             log.debug("[Intent] knowledge — tanda tanya")
             return "knowledge"
 
-        # ── 3. Kata tanya / perintah informatif ──────────────────────────────
         KNOWLEDGE_PHRASES = {
-            # frasa Indonesia umum
             "apa itu", "yang mana", "di mana",
-            # perintah dengan awalan "coba"
             "coba ranking", "coba urutkan", "coba sebutkan", "coba jelaskan",
             "coba bandingkan", "coba ceritakan", "coba buat", "coba berikan",
             "coba tampilkan", "coba tunjukkan",
-            # perintah dengan awalan "tolong"
             "tolong jelaskan", "tolong sebutkan", "tolong ranking",
             "tolong urutkan", "tolong buat", "tolong berikan", "tolong ceritakan",
-            # perintah dengan awalan "bisa"
             "bisa jelaskan", "bisa sebutkan", "bisa ranking", "bisa urutkan",
-            # frasa urutan/perbandingan
             "dari yang", "mulai dari", "urutan dari",
             "dari terbanyak", "dari terbesar", "dari tertinggi",
             "sampai yang sedikit", "sampai yang kecil", "sampai yang rendah",
         }
         KNOWLEDGE_WORDS = {
-            # kata tanya Indonesia
             "apa", "apakah", "bagaimana", "mengapa", "kenapa",
             "siapa", "kapan", "dimana", "berapa", "seberapa", "manakah",
-            # perintah informatif langsung
             "jelaskan", "sebutkan", "ceritakan", "gambarkan",
             "deskripsikan", "definisikan", "definisi", "contoh", "contohkan",
             "bandingkan", "bedakan", "perbedaan", "persamaan",
@@ -1664,19 +1671,15 @@ class RAGPipeline:
             "pengertian", "maksud", "artinya", "fungsi", "manfaat",
             "ciri", "karakteristik", "jenis", "macam", "klasifikasi",
             "penanganan", "pengobatan", "pengendalian", "pencegahan",
-            # perintah ranking/urutan — sering tanpa tanda tanya
             "ranking", "rangking", "urutan", "urutkan",
             "peringkat", "daftar", "susun", "susunkan",
             "terbanyak", "tersedikit", "terbesar", "terkecil",
             "tertinggi", "terendah", "terluas",
-            # awalan perintah umum
             "buatkan", "berikan", "tampilkan", "tunjukkan",
             "rekomendasikan", "rekomendasi",
-            # domain pertanian/hama/penyakit — query domain = knowledge
             "hama", "penyakit", "patogen", "serangan", "infeksi",
             "tanaman", "tumbuhan", "pertanian", "agronomi", "pestisida",
             "pupuk", "lahan", "sawah", "kebun", "panen", "benih", "bibit",
-            # kata tanya Inggris
             "what", "how", "why", "when", "where", "who", "which",
             "explain", "describe", "list", "define", "compare", "rank",
             "causes", "symptoms", "treatment", "control", "prevention",
@@ -1695,10 +1698,7 @@ class RAGPipeline:
 
     @staticmethod
     def _detect_language(text: str) -> str:
-        """
-        Deteksi bahasa query.
-        Default Indonesia — return 'en' hanya jika ada ≥2 marker Inggris.
-        """
+        """Deteksi bahasa query. Default Indonesia."""
         en_markers = {
             "what", "how", "why", "when", "where", "who", "which",
             "explain", "describe", "tell", "list", "give", "show",
@@ -1715,10 +1715,8 @@ class RAGPipeline:
     def _get_model_tier() -> str:
         model = CONFIG.get("groq_model", "").lower()
 
-        # ── Deteksi ukuran dari nama model ────────────────────────────────────
-        # Pola: angka sebelum 'b' (misal "70b", "3b", "8b", "32b")
-        import re
-        matches = re.findall(r"(\d+)b", model)
+        import re as _r
+        matches = _r.findall(r"(\d+)b", model)
         if matches:
             size = max(int(m) for m in matches)
             if size <= 4:
@@ -1727,7 +1725,6 @@ class RAGPipeline:
                 return "medium"
             return "large"
 
-        # Fallback keyword-based
         if any(k in model for k in ("70b", "72b", "8x22b", "mixtral")):
             return "large"
         if any(k in model for k in ("32b",)):
@@ -1737,7 +1734,7 @@ class RAGPipeline:
         if any(k in model for k in ("3b", "1b")):
             return "small"
 
-        return "large"  # default ke large jika tidak dikenali
+        return "large"
 
     def _build_messages(
         self,
@@ -1751,17 +1748,15 @@ class RAGPipeline:
         _usable = safe_budget - FIXED_OVERHEAD_TOKENS
         max_chars = min(int(_usable * 0.30 * 4), CONFIG["context_max_chars"])
 
-        # Kurangi context window untuk model kecil/medium
         if tier == "small":
-            max_chars = min(max_chars, 3_000)   # ~750 token untuk context
+            max_chars = min(max_chars, 3_000)
         elif tier == "medium":
-            max_chars = min(max_chars, 6_000)   # ~1500 token untuk context
+            max_chars = min(max_chars, 6_000)
 
         log.info(
             "[BuildMessages] tier=%s  context_max_chars(CONFIG)=%d  max_chars(efektif)=%d",
             tier, CONFIG["context_max_chars"], max_chars,
         )
-        # large → pakai max_chars penuh dari CONFIG
 
         context_parts: List[str] = []
         used_chars = 0
@@ -1789,7 +1784,7 @@ class RAGPipeline:
         lang = lang if lang is not None else self._detect_language(query)
 
         if lang == "id":
-            _max_memory_chars = 1_200  # ~300 token, cukup untuk context singkat
+            _max_memory_chars = 1_200
             if memory and len(memory) > _max_memory_chars:
                 memory = memory[:_max_memory_chars] + "…"
                 log.debug("[BuildMessages] Memory dipotong ke %d char", _max_memory_chars)
@@ -1797,11 +1792,10 @@ class RAGPipeline:
                 PROMPTS["knowledge_memory_block_id"].format(memory=memory)
                 if memory else ""
             )
-            # Pilih prompt key berdasarkan tier model
             prompt_key = {
-                "small":  "knowledge_system_id_local",   # prompt ringkas
-                "medium": "knowledge_system_id_local",   # sama dengan small — padat
-                "large":  "knowledge_system_id",          # prompt penuh + few-shot
+                "small":  "knowledge_system_id_local",
+                "medium": "knowledge_system_id_local",
+                "large":  "knowledge_system_id",
             }[tier]
             system_content = PROMPTS[prompt_key].format(
                 memory_section=memory_section,
@@ -1848,17 +1842,14 @@ class RAGPipeline:
         lang:       str = None,
         memory:     str | None = None,
     ) -> List[Dict]:
-        """
-        Build messages untuk Regular RAG (tanpa metadata jurnal kompleks).
-        """
+        """Build messages untuk Regular RAG (tanpa metadata jurnal kompleks)."""
         lang = lang if lang is not None else self._detect_language(query)
         tier = self._get_model_tier()
 
-        # Batasi context length
         safe_budget = GROQ_MODEL_SAFE_TOKEN_BUDGET.get(CONFIG["groq_model"], 4_800)
         _usable = safe_budget - FIXED_OVERHEAD_TOKENS
         max_chars = min(int(_usable * 0.30 * 4), CONFIG["context_max_chars"])
-        
+
         if tier == "small":
             max_chars = min(max_chars, 3_000)
         elif tier == "medium":
@@ -1926,17 +1917,7 @@ class RAGPipeline:
         top_p:          float = None,
         max_new_tokens: int   = None,
     ) -> Generator[str, None, None]:
-        """
-        Generate jawaban — routing otomatis berdasarkan CONFIG["llm_mode"]:
-          - "groq"  → Groq API (streaming SSE)
-          - "local" → LlamaCpp (streaming token-by-token dari GGUF lokal)
-
-        Parameter messages adalah list OpenAI-style chat messages:
-          [{"role": "system"|"user"|"assistant", "content": "..."}]
-
-        stop_event.set() dari luar → hentikan iterasi streaming lebih awal.
-        temperature, top_p, max_new_tokens — jika None, pakai CONFIG default.
-        """
+        """Generate jawaban — routing otomatis berdasarkan CONFIG['llm_mode']."""
         _temperature    = temperature    if temperature    is not None else CONFIG["temperature"]
         _top_p          = top_p          if top_p          is not None else CONFIG["top_p"]
         _max_new_tokens = max_new_tokens if max_new_tokens is not None else CONFIG["max_new_tokens"]
@@ -2006,21 +1987,7 @@ class RAGPipeline:
         top_p:          float,
         max_new_tokens: int,
     ) -> Generator[str, None, None]:
-        """
-        Generate via HuggingFace AutoModelForCausalLM (folder clone dari HF Hub).
-
-        Menggunakan TextIteratorStreamer agar token bisa di-yield satu per satu
-        ke SSE tanpa menunggu seluruh respons selesai.
-
-        Alur:
-          1. Format messages → apply_chat_template (pakai template bawaan model)
-          2. Tokenisasi → tensor GPU
-          3. model.generate() dijalankan di thread terpisah (agar tidak blocking)
-          4. TextIteratorStreamer di-iterate di thread utama → yield token
-          5. stop_event.set() → hentikan iteration lebih awal
-
-        GPU dimonopoli oleh LLM lokal — embedding/reranker/nlp sudah di CPU.
-        """
+        """Generate via HuggingFace AutoModelForCausalLM (folder clone dari HF Hub)."""
         model_name = os.path.basename(CONFIG.get("local_llm_path", "local"))
         log.info(
             "[LocalLLM] Generate — model=%s  max_tokens=%d  temperature=%.2f  top_p=%.2f",
@@ -2032,9 +1999,6 @@ class RAGPipeline:
         model       = self.models.local_llm
 
         try:
-            # ── 1. Format prompt via chat template ───────────────────────────
-            # apply_chat_template mengubah list messages ke string prompt
-            # yang sesuai dengan format training model (Mistral, Qwen, dll)
             try:
                 encoding = tokenizer.apply_chat_template(
                     messages,
@@ -2043,21 +2007,18 @@ class RAGPipeline:
                 )
                 input_ids = encoding.input_ids.to(model.device)
             except Exception:
-                # Fallback: model tidak punya chat template → concat manual
                 log.warning("[LocalLLM] Chat template tidak tersedia, gunakan fallback")
                 raw = "".join(
                     f"{m['role'].upper()}: {m['content']}" for m in messages
                 ) + "ASSISTANT:"
                 prompt_ids = tokenizer(raw, return_tensors="pt").input_ids.to(model.device)
 
-            # ── 2. Streamer setup ─────────────────────────────────────────────
             streamer = TextIteratorStreamer(
                 tokenizer,
-                skip_prompt=True,        # jangan re-yield token prompt
+                skip_prompt=True,
                 skip_special_tokens=True,
             )
 
-            # ── 3. Generation config ─────────────────────────────────────────
             gen_kwargs = dict(
                 input_ids=input_ids,
                 streamer=streamer,
@@ -2069,7 +2030,6 @@ class RAGPipeline:
                 eos_token_id=tokenizer.eos_token_id,
             )
 
-            # ── 4. Generate di background thread ─────────────────────────────
             gen_thread = threading.Thread(
                 target=model.generate,
                 kwargs=gen_kwargs,
@@ -2077,7 +2037,6 @@ class RAGPipeline:
             )
             gen_thread.start()
 
-            # ── 5. Iterate streamer — yield token ke SSE ──────────────────────
             for text in streamer:
                 if stop_event is not None and stop_event.is_set():
                     log.info("[LocalLLM] Stop event pada token %d", token_count)
@@ -2100,7 +2059,7 @@ class RAGPipeline:
     # ── Utility ───────────────────────────────────────────────────────────────
 
     def simple_retrieval(self, query: str, k: int = 5) -> List[Dict]:
-        """Testing retrieval tanpa LLM — kembalikan top-k chunk dengan metadata."""
+        """Testing retrieval tanpa LLM."""
         log.info("simple_retrieval: query=%r  k=%d", query[:80], k)
 
         emb        = self.models.get_embedding(query)
@@ -2119,26 +2078,25 @@ class RAGPipeline:
             }
             for c in enriched
         ]
-    
+
     def _analyze_image(self, base64_image: str) -> str:
         """Langkah 1: Ekstrak informasi dari gambar menjadi teks deskriptif."""
         gemini_api_key = os.environ.get("GEMINI_API_KEY")
         if not gemini_api_key:
             return "Gambar diterima, tetapi GEMINI_API_KEY tidak ditemukan di environment."
-        
+
         genai.configure(api_key=gemini_api_key)
-        # Gunakan model Gemini yang tersedia di akun Anda
-        model = genai.GenerativeModel('gemini-2.0-flash') 
-        
+        model = genai.GenerativeModel('gemini-2.0-flash')
+
         try:
             image_data = base64.b64decode(base64_image)
             img = Image.open(io.BytesIO(image_data))
         except Exception as e:
             log.error(f"[Vision] Gagal memuat gambar: {e}")
             return "Gambar yang diunggah rusak atau tidak dapat dibaca."
-            
+
         prompt = "Sebagai pakar pertanian, tolong identifikasi dan jelaskan apa yang terlihat pada gambar tanaman ini secara detail, khususnya jika terdapat gejala penyakit, hama, atau kondisi abnormal."
-        
+
         try:
             response = model.generate_content([prompt, img])
             return response.text
@@ -2164,10 +2122,7 @@ def get_rag_pipeline() -> RAGPipeline:
 
 
 def reset_pipeline() -> None:
-    """
-    Paksa destroy dan rebuild seluruh pipeline + model.
-    Dipanggil dari app.py ketika terdeteksi instance lama (stale singleton).
-    """
+    """Paksa destroy dan rebuild seluruh pipeline + model."""
     global _rag_pipeline
     log.warning("reset_pipeline() dipanggil — rebuild dari nol.")
     if _rag_pipeline is not None:
@@ -2181,7 +2136,6 @@ def reset_pipeline() -> None:
 
 
 def reload_with_model(mode: str, local_llm_path: str = None) -> None:
-
     if mode != "groq":
         raise ValueError(
             "Mode 'local' dinonaktifkan. Hanya mode 'groq' yang didukung saat ini."

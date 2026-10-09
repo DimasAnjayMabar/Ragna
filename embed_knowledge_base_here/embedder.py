@@ -4,9 +4,10 @@ import re
 import os
 import sys
 import uuid
+import threading
 from pathlib import Path
 from typing import List, Dict, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import pdfplumber
 import chromadb
 from neo4j import GraphDatabase
@@ -97,6 +98,9 @@ class IsiNode:
     sub_judul: str
     konten_chunk: str
     halaman: int
+    quarantined: bool = False          # BARU: hasil scanner
+    scan_score: float = 0.0            # BARU: risk score scanner
+    scan_matched: Optional[list] = None  # BARU: pattern yang match
 
 # =============================================================================
 # FILE HASHING (MD5) FOR DUPLICATE DETECTION
@@ -117,6 +121,185 @@ def is_file_processed(neo4j_driver, file_hash: str) -> bool:
     with neo4j_driver.session() as session:
         result = session.run(query, file_hash=file_hash).single()
         return result["exists"] if result else False
+
+# =============================================================================
+# PROMPT INJECTION SCANNER (BARU)
+# =============================================================================
+#
+# Scanner ini mendeteksi pola prompt injection di dalam chunk/baris yang
+# berasal dari PDF yang di-upload user. Referensi pattern diambil dari
+# node :Instruction di Neo4j (lihat prompt_guard.py).
+#
+# Alur:
+#   1. Load instruction set dari Neo4j per bahasa (cached in-memory).
+#   2. Untuk setiap chunk, cek apakah ada pattern regex dari
+#      forbidden_patterns yang match.
+#   3. Return risk score & matched slot.
+#
+# Cache di-invalidate dengan invalidate_instruction_cache() jika
+# instruction set di Neo4j diperbarui.
+# =============================================================================
+
+_INSTRUCTION_CACHE: Dict[str, List[Dict]] = {}
+_INSTRUCTION_CACHE_LOCK = threading.Lock()
+_COMPILED_PATTERN_CACHE: Dict[str, re.Pattern] = {}
+_RISK_WEIGHT = {"high": 1.0, "medium": 0.7, "low": 0.4}
+
+
+def _get_compiled_pattern(pattern: str) -> re.Pattern:
+    """Pre-compile regex — cache agar tidak compile ulang tiap chunk."""
+    if pattern not in _COMPILED_PATTERN_CACHE:
+        try:
+            _COMPILED_PATTERN_CACHE[pattern] = re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            # Pattern invalid → compile pattern yang tidak pernah match
+            _COMPILED_PATTERN_CACHE[pattern] = re.compile(r"(?!x)x")
+    return _COMPILED_PATTERN_CACHE[pattern]
+
+
+def _load_instructions_for_lang(neo4j_driver, lang: str) -> List[Dict]:
+    """
+    Ambil instruction set dari Neo4j untuk bahasa tertentu.
+    Hasil di-cache di memory — panggil ulang dengan bahasa sama
+    tidak akan query Neo4j lagi.
+    """
+    with _INSTRUCTION_CACHE_LOCK:
+        if lang in _INSTRUCTION_CACHE:
+            return _INSTRUCTION_CACHE[lang]
+
+    try:
+        with neo4j_driver.session() as session:
+            result = session.run(
+                """
+                MATCH (i:Instruction {lang: $lang})
+                RETURN i.slot               AS slot,
+                       i.forbidden_patterns AS patterns,
+                       i.risk_level         AS risk_level
+                """,
+                lang=lang,
+            ).data()
+        instructions = [
+            {
+                "slot": r["slot"],
+                "patterns": r["patterns"] or [],
+                "risk_level": r["risk_level"] or "medium",
+            }
+            for r in result
+        ]
+    except Exception as e:
+        logger.warning("[Scanner] Gagal ambil instruction lang=%s: %s", lang, e)
+        instructions = []
+
+    with _INSTRUCTION_CACHE_LOCK:
+        _INSTRUCTION_CACHE[lang] = instructions
+    return instructions
+
+
+def invalidate_instruction_cache(lang: Optional[str] = None):
+    """Paksa refresh cache instruction set. Dipanggil setelah re-ingest."""
+    with _INSTRUCTION_CACHE_LOCK:
+        if lang is None:
+            _INSTRUCTION_CACHE.clear()
+        else:
+            _INSTRUCTION_CACHE.pop(lang, None)
+    logger.info("[Scanner] Instruction cache di-invalidate (lang=%s)", lang or "all")
+
+
+def scan_chunk_against_instructions(
+    text: str,
+    neo4j_driver,
+    lang: str = "id",
+) -> Dict:
+    """
+    Scan teks terhadap instruction set graph.
+
+    Return:
+        {
+            "is_suspicious": bool,
+            "matched_patterns": [str],
+            "risk_score": float,  # 0..1
+            "matched_slot": str | None,
+        }
+
+    Catatan:
+        - Pattern di-pre-compile & di-cache.
+        - Instruction set di-cache per bahasa.
+        - Risk score: 1.0 untuk match di slot high, 0.7 medium, 0.4 low.
+    """
+    instructions = _load_instructions_for_lang(neo4j_driver, lang)
+
+    matched_patterns: List[str] = []
+    matched_slot: Optional[str] = None
+    max_risk = 0.0
+
+    for instr in instructions:
+        slot_weight = _RISK_WEIGHT.get(instr["risk_level"], 0.5)
+        for pattern in instr["patterns"]:
+            try:
+                rx = _get_compiled_pattern(pattern)
+                if rx.search(text):
+                    matched_patterns.append(pattern)
+                    if slot_weight > max_risk:
+                        max_risk = slot_weight
+                        matched_slot = instr["slot"]
+            except Exception:
+                continue
+
+    return {
+        "is_suspicious": len(matched_patterns) > 0,
+        "matched_patterns": matched_patterns,
+        "risk_score": max_risk,
+        "matched_slot": matched_slot,
+    }
+
+
+def scan_lines_against_instructions(
+    lines: List[Dict],
+    neo4j_driver,
+    lang: str = "id",
+) -> List[Dict]:
+    """
+    Scan setiap baris hasil parse PDF — mendeteksi injeksi di level baris.
+    Return: list baris yang mencurigakan (untuk audit log).
+    """
+    suspicious = []
+    for line in lines:
+        text = line.get("text", "")
+        if not text:
+            continue
+        result = scan_chunk_against_instructions(text, neo4j_driver, lang)
+        if result["is_suspicious"]:
+            suspicious.append({
+                "page": line.get("page"),
+                "text": text,
+                "matched_slot": result["matched_slot"],
+                "matched_patterns": result["matched_patterns"],
+                "risk_score": result["risk_score"],
+            })
+    return suspicious
+
+
+def scan_chunks_against_instructions(
+    chunks: List[str],
+    neo4j_driver,
+    lang: str = "id",
+) -> List[Dict]:
+    """
+    Scan list chunk (untuk Raw pipeline).
+    Return: list hasil scan per chunk yang mencurigakan.
+    """
+    suspicious = []
+    for idx, chunk in enumerate(chunks):
+        result = scan_chunk_against_instructions(chunk, neo4j_driver, lang)
+        if result["is_suspicious"]:
+            suspicious.append({
+                "chunk_index": idx,
+                "matched_slot": result["matched_slot"],
+                "matched_patterns": result["matched_patterns"],
+                "risk_score": result["risk_score"],
+            })
+    return suspicious
+
 
 # =============================================================================
 # STEP 1 — PDF INGESTION (2-COLUMN AWARE)
@@ -392,6 +575,7 @@ def build_isi_nodes(lines: List[Dict], jurnal_id: str) -> List[IsiNode]:
                 sub_judul=current_heading,
                 konten_chunk=chunk,
                 halaman=current_page_start,
+                scan_matched=[],  # BARU: default list kosong
             ))
             global_chunk_counter += 1
 
@@ -459,6 +643,9 @@ class Neo4jIngestor:
                 "sub_judul": n.sub_judul,
                 "konten_chunk": n.konten_chunk,
                 "halaman": n.halaman,
+                "quarantined": getattr(n, "quarantined", False),          # BARU
+                "scan_score": getattr(n, "scan_score", 0.0),              # BARU
+                "scan_matched": getattr(n, "scan_matched", []) or [],     # BARU
             }
             for n in isi_nodes
         ]
@@ -469,7 +656,10 @@ class Neo4jIngestor:
                 MERGE (i:Isi {id: row.id})
                 SET i.sub_judul    = row.sub_judul,
                     i.konten_chunk = row.konten_chunk,
-                    i.halaman      = row.halaman
+                    i.halaman      = row.halaman,
+                    i.quarantined  = row.quarantined,
+                    i.scan_score   = row.scan_score,
+                    i.scan_matched = row.scan_matched
             """, batch=batch)
 
             session.run("""
@@ -552,6 +742,23 @@ def run_pipeline(pdf_path: str,
     lines = parse_pdf_to_lines(pdf_path)
     lines = clean_lines(lines)
 
+    # ── BARU: Scan per baris (audit level — log saja, tidak blokir) ─────
+    try:
+        line_suspicious = scan_lines_against_instructions(lines, neo4j.driver, lang="id")
+        if line_suspicious:
+            logger.warning(
+                "[Scanner] %d baris suspicious terdeteksi di %s",
+                len(line_suspicious), os.path.basename(pdf_path),
+            )
+            for item in line_suspicious[:5]:  # limit log
+                logger.warning(
+                    "[Scanner]   hal.%s slot=%s patterns=%s",
+                    item["page"], item["matched_slot"], item["matched_patterns"],
+                )
+    except Exception as e:
+        logger.warning("[Scanner] Line scan gagal: %s", e)
+    # ──────────────────────────────────────────────────────────────────────
+
     jurnal_id = str(uuid.uuid4())
     jurnal = JurnalNode(
         id=jurnal_id,
@@ -565,14 +772,55 @@ def run_pipeline(pdf_path: str,
 
     isi_nodes = build_isi_nodes(lines, jurnal.id)
 
+    # ── BARU: Scan per chunk → tandai quarantined ────────────────────────
+    try:
+        for node in isi_nodes:
+            scan_result = scan_chunk_against_instructions(
+                node.konten_chunk, neo4j.driver, lang="id"
+            )
+            if scan_result["is_suspicious"]:
+                logger.warning(
+                    "[Scanner] Chunk suspicious — sub_judul=%r slot=%s risk=%.2f patterns=%s",
+                    node.sub_judul,
+                    scan_result["matched_slot"],
+                    scan_result["risk_score"],
+                    scan_result["matched_patterns"],
+                )
+                node.quarantined = True
+                node.scan_score = scan_result["risk_score"]
+                node.scan_matched = scan_result["matched_patterns"]
+            else:
+                node.quarantined = False
+                node.scan_score = 0.0
+                node.scan_matched = []
+    except Exception as e:
+        logger.warning("[Scanner] Chunk scan gagal — semua chunk dianggap aman: %s", e)
+        for node in isi_nodes:
+            node.quarantined = False
+            node.scan_score = 0.0
+            node.scan_matched = []
+
+    # Filter: hanya chunk aman yang masuk ChromaDB
+    safe_nodes = [n for n in isi_nodes if not n.quarantined]
+    if len(safe_nodes) < len(isi_nodes):
+        logger.warning(
+            "[Scanner] %d dari %d chunk di-quarantine — tidak di-ingest ke ChromaDB.",
+            len(isi_nodes) - len(safe_nodes), len(isi_nodes),
+        )
+    # ──────────────────────────────────────────────────────────────────────
+
     neo4j.ingest_jurnal(jurnal)
-    neo4j.ingest_isi_nodes(isi_nodes)
-    chroma.ingest_isi_nodes(isi_nodes, rag_models, judul_jurnal=jurnal.judul)
+    neo4j.ingest_isi_nodes(isi_nodes)  # tetap ingest semua, tapi dengan flag quarantined
+    chroma.ingest_isi_nodes(safe_nodes, rag_models, judul_jurnal=jurnal.judul)
 
     return {
         "jurnal": jurnal,
         "isi_nodes": isi_nodes,
-        "stats": {"total_isi_nodes": len(isi_nodes)},
+        "stats": {
+            "total_isi_nodes": len(isi_nodes),
+            "safe_isi_nodes": len(safe_nodes),
+            "quarantined_isi_nodes": len(isi_nodes) - len(safe_nodes),
+        },
     }
 
 # =============================================================================
@@ -598,8 +846,6 @@ class ChromaIngestorRaw:
     """
 
     def __init__(self, persist_directory: str = CHROMA_PATH, chroma_client=None):
-        # Jika client dipinjam dari pipeline singleton, pakai langsung
-        # (hindari error "An instance of Chroma already exists with different settings").
         if chroma_client is not None:
             self.client = chroma_client
         else:
@@ -644,7 +890,7 @@ def run_pipeline_raw(pdf_path: str,
                      chroma_raw: ChromaIngestorRaw) -> Optional[Dict]:
     """
     Pipeline RAW: PDF -> 2-column detection -> boilerplate removal
-                  -> flat chunking -> embed -> konten_isi_raw
+                  -> flat chunking -> scan injection -> embed -> konten_isi_raw
     Return None jika file duplikat (hash sudah ada) atau tidak ada konten.
     """
     logger.info("[RAW] Processing: %s", pdf_path)
@@ -663,9 +909,54 @@ def run_pipeline_raw(pdf_path: str,
     full_text = " ".join(l["text"] for l in lines)
     chunks = split_text_word_safe(full_text, MAX_TOKENS_PER_CHUNK)
 
+    # ── BARU: Scan setiap chunk terhadap instruction set ─────────────────
+    # Raw pipeline tidak punya Neo4j ingestor — buat koneksi sementara.
+    safe_chunks: List[str] = []
+    try:
+        from neo4j import GraphDatabase as _GD
+        _raw_driver = _GD.driver(
+            NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD)
+        )
+        try:
+            _raw_driver.verify_connectivity()
+            suspicious = scan_chunks_against_instructions(
+                chunks, _raw_driver, lang="id"
+            )
+            suspicious_idx = {s["chunk_index"] for s in suspicious}
+
+            for idx, chunk in enumerate(chunks):
+                if idx in suspicious_idx:
+                    match = next(
+                        (s for s in suspicious if s["chunk_index"] == idx), None
+                    )
+                    logger.warning(
+                        "[Scanner RAW] Chunk #%d suspicious — dibuang (slot=%s risk=%.2f patterns=%s)",
+                        idx,
+                        match["matched_slot"] if match else "?",
+                        match["risk_score"] if match else 0.0,
+                        match["matched_patterns"] if match else [],
+                    )
+                else:
+                    safe_chunks.append(chunk)
+        finally:
+            _raw_driver.close()
+    except Exception as e:
+        logger.warning(
+            "[Scanner RAW] Scan gagal — pakai semua chunk tanpa filter: %s", e
+        )
+        safe_chunks = list(chunks)
+    # ──────────────────────────────────────────────────────────────────────
+
+    if not safe_chunks:
+        logger.warning(
+            "[RAW] Semua chunk ter-quarantine (%d/%d) — tidak ada yang di-ingest.",
+            len(chunks), len(chunks),
+        )
+        return None
+
     jurnal_id = str(uuid.uuid4())
     chroma_raw.ingest_chunks(
-        chunks=chunks,
+        chunks=safe_chunks,
         file_hash=file_hash,
         jurnal_id=jurnal_id,
         source_file=pdf_path,
@@ -675,7 +966,12 @@ def run_pipeline_raw(pdf_path: str,
     return {
         "jurnal_id":   jurnal_id,
         "source_file": pdf_path,
-        "stats": {"total_lines": len(lines), "total_chunks": len(chunks)},
+        "stats": {
+            "total_lines": len(lines),
+            "total_chunks": len(chunks),
+            "safe_chunks": len(safe_chunks),
+            "quarantined_chunks": len(chunks) - len(safe_chunks),
+        },
     }
 
 
