@@ -45,6 +45,7 @@ SLOT_ORDER = [
     "bot_identity",
     "social_guard_rail",
     "knowledge_guard_rail",
+    "product_guard_rail",
     "memory_block_guard_rail",
     "memory_summary_block",
 ]
@@ -54,6 +55,7 @@ SLOT_RISK_LEVEL = {
     "bot_identity":            "high",
     "social_guard_rail":       "high",
     "knowledge_guard_rail":    "high",
+    "product_guard_rail": "high",
     "memory_block_guard_rail": "medium",
     "memory_summary_block":    "low",
 }

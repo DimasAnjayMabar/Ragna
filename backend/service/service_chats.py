@@ -58,28 +58,45 @@ def _cleanup_stop_event(detail_id: int) -> None:
 def _get_or_create_event(detail_id: int) -> asyncio.Event:
     with _events_lock:
         if detail_id not in _pending_events:
-            _pending_events[detail_id] = asyncio.Event()
+            event = asyncio.Event()
+            # Capture reference ke event loop utama (dari FastAPI handler).
+            # Worker thread tidak punya loop sendiri, jadi kita simpan di sini
+            # supaya call_soon_threadsafe bisa dipakai nanti.
+            try:
+                event._loop_ref = asyncio.get_running_loop()  # type: ignore
+            except RuntimeError:
+                event._loop_ref = None  # type: ignore
+            _pending_events[detail_id] = event
         return _pending_events[detail_id]
 
 
 def _signal_done(detail_id: int) -> None:
     """
-    Memberikan sinyal 'done' ke event yang sedang ditunggu oleh SSE.
-    Aman dipanggil dari background thread.
+    Sinyal 'done' ke event yang ditunggu SSE.
+    Aman dipanggil dari background thread (worker pipeline).
     """
     with _events_lock:
         event = _pending_events.get(detail_id)
-        if event:
+        if not event:
+            return
+        
+        loop = getattr(event, "_loop_ref", None)
+        
+        if loop is not None and loop.is_running():
             try:
-                # Ambil event loop utama yang sedang berjalan
-                loop = asyncio.get_event_loop()
-                # Set event secara thread-safe
                 loop.call_soon_threadsafe(event.set)
+                return
             except Exception as e:
-                logger.error(f"Gagal mengirim sinyal done untuk {detail_id}: {e}")
-                # Fallback jika loop sulit didapat (biasanya pada shutdown)
-                event.set()
-
+                logger.warning(
+                    f"call_soon_threadsafe gagal untuk {detail_id}: {e}"
+                )
+        
+        # Fallback — set langsung. Di CPython ini thread-safe karena GIL,
+        # tapi spec asyncio tidak menjamin. Ini hanya last-resort.
+        try:
+            event.set()
+        except Exception as e:
+            logger.error(f"Gagal set event untuk {detail_id}: {e}")
 
 def _cleanup_event(detail_id: int) -> None:
     with _events_lock:
@@ -94,6 +111,11 @@ def _reset_event(detail_id: int) -> asyncio.Event:
     with _events_lock:
         _pending_events.pop(detail_id, None)
         event = asyncio.Event()
+        # Capture loop reference — konsisten dengan _get_or_create_event
+        try:
+            event._loop_ref = asyncio.get_running_loop()  # type: ignore
+        except RuntimeError:
+            event._loop_ref = None  # type: ignore
         _pending_events[detail_id] = event
 
     # Reset stop event juga agar pipeline baru tidak langsung berhenti
@@ -112,19 +134,24 @@ def _call_llm(
     chat_id: int,
     user_id: int | None = None,
     stop_event: threading.Event = None,
-    base64_image: str | None = None, # <--- TAMBAHAN
+    base64_image: str | None = None,
 ) -> dict:
     start    = time.time()
     pipeline = get_rag_pipeline()
     full_response = ""
     
-    # Cukup panggil process_query, pipeline yang akan mengurus pemisahan/penggabungan
     rag_response = pipeline.process_query(
         query=question,
         chat_id=chat_id,
         user_id=user_id,
         stop_event=stop_event,
-        base64_image=base64_image # <--- DITERUSKAN
+        base64_image=base64_image,
+    )
+    
+    # ── Log intent ────────────────────────────────────────────────
+    logger.info(
+        f"[RAG] intent={rag_response.intent}  "
+        f"question={question[:50]!r}  chat_id={chat_id}"
     )
     
     for token in rag_response.answer:
@@ -132,12 +159,51 @@ def _call_llm(
             break
         full_response += token
 
+    # ── Fallback: product intent tapi LLM output kosong ───────────
+    # Terjadi kalau model reasoning (mis. gpt-oss-120b) habiskan token
+    # di reasoning tanpa pernah output final answer.
+    # Fallback ini akan generate marker secara programatik supaya
+    # kartu produk tetap muncul di Flutter.
+    if rag_response.intent == "product" and not full_response.strip():
+        logger.warning(
+            "[RAG] Empty product response — generating fallback message + markers"
+        )
+        product_items = [
+            s for s in rag_response.sources
+            if isinstance(s, dict) and s.get("tipe") == "produk"
+        ]
+        
+        if product_items:
+            parts = ["Halo! Ini rekomendasi yang pas buat Anda:\n"]
+            for p in product_items:
+                harga_str = (
+                    f"Rp{p['harga_per_meter']:,}".replace(",", ".")
+                    if p.get("harga_per_meter") else "-"
+                )
+                parts.append(
+                    f"Motif **{p['nama_motif']}** dari {p['nama_umkm']} — "
+                    f"{harga_str}/meter, WA {p['kontak_wa']}."
+                )
+                parts.append(
+                    f"[[PRODUCT_CARD:{p['id_umkm']}|{p['nama_motif']}|"
+                    f"{p['nama_umkm']}|{p['harga_per_meter']}|{p['kontak_wa']}]]"
+                )
+            parts.append(
+                "\nKlik kartu di bawah untuk hubungi penjual langsung via WhatsApp ya!"
+            )
+            full_response = "\n".join(parts)
+            logger.info(
+                f"[RAG] Fallback generated — {len(product_items)} produk, "
+                f"{len(full_response)} chars"
+            )
+
     return {
         "response":      full_response,
         "input_tokens":  len(question.split()),
         "output_tokens": len(full_response.split()),
         "total_cost":    0.0,
         "latency_ms":    int((time.time() - start) * 1000),
+        "intent":        rag_response.intent,
     }
 
 

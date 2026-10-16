@@ -40,7 +40,7 @@ class AiAvatar extends StatelessWidget {
 class UserBubble extends StatelessWidget {
   const UserBubble({super.key, required this.text, this.imageBytes});
   final String text;
-  final Uint8List? imageBytes; // <--- DITAMBAHKAN UNTUK GAMBAR
+  final Uint8List? imageBytes;
 
   @override
   Widget build(BuildContext context) {
@@ -105,7 +105,7 @@ class AiBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final defaultErrorText = 'Maaf, terjadi kesalahan saat memproses pertanyaan Anda.';
     final displayText = isError && text.isEmpty ? defaultErrorText : text;
-    
+
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -130,7 +130,7 @@ class AiBubble extends StatelessWidget {
                 bottomRight: Radius.circular(16),
               ),
               border: Border.all(
-                color: isError 
+                color: isError
                     ? const Color(0xFFFF4444).withValues(alpha: 0.3)
                     : const Color(0xFF1A1A1A),
               ),
@@ -145,20 +145,271 @@ class AiBubble extends StatelessWidget {
                         height: 1.6,
                       ),
                     )
-                  : MarkdownBody(
-                      data: displayText,
-                      selectable: false,
-                      extensionSet: md.ExtensionSet.gitHubWeb,
-                      onTapLink: (text, href, title) {
-                        if (href != null) launchUrl(Uri.parse(href));
-                      },
-                      styleSheet: _markdownStyleSheet(),
-                    ),
+                  : _RichAiContent(data: displayText),
             ),
           ),
         ),
       ],
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rich AI Content — parse marker [[PRODUCT_CARD:...]]
+// ---------------------------------------------------------------------------
+
+/// Menerima teks dari LLM. Jika mengandung marker produk
+/// `[[PRODUCT_CARD:id|motif|toko|harga|wa]]`, marker tersebut di-split
+/// dan di-render sebagai widget kartu produk (bukan teks).
+///
+/// Jika tidak ada marker, seluruh teks di-render sebagai Markdown biasa.
+class _RichAiContent extends StatelessWidget {
+  const _RichAiContent({required this.data});
+  final String data;
+
+  static final _cardRegex = RegExp(r'\[\[PRODUCT_CARD:([^\]]+)\]\]');
+
+  @override
+  Widget build(BuildContext context) {
+    final matches = _cardRegex.allMatches(data).toList();
+
+    // Tidak ada marker → render markdown biasa
+    if (matches.isEmpty) {
+      return MarkdownBody(
+        data: data,
+        selectable: false,
+        extensionSet: md.ExtensionSet.gitHubWeb,
+        inlineSyntaxes: [_BreakSyntax()],
+        softLineBreak: true,
+        onTapLink: (text, href, title) {
+          if (href != null) launchUrl(Uri.parse(href));
+        },
+        styleSheet: _markdownStyleSheet(),
+      );
+    }
+
+    // Ada marker → split & render bergantian
+    final widgets = <Widget>[];
+    int cursor = 0;
+
+    for (final m in matches) {
+      // Teks sebelum marker
+      if (m.start > cursor) {
+        final textPart = data.substring(cursor, m.start).trim();
+        if (textPart.isNotEmpty) {
+          widgets.add(MarkdownBody(
+            data: textPart,
+            selectable: false,
+            extensionSet: md.ExtensionSet.gitHubWeb,
+            inlineSyntaxes: [_BreakSyntax()],
+            softLineBreak: true,
+            onTapLink: (text, href, title) {
+              if (href != null) launchUrl(Uri.parse(href));
+            },
+            styleSheet: _markdownStyleSheet(),
+          ));
+        }
+      }
+
+      // Parse field dari marker
+      final fields = m.group(1)!.split('|');
+      if (fields.length >= 5) {
+        widgets.add(Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: _ProductCard(
+            idUmkm:   fields[0].trim(),
+            motif:    fields[1].trim(),
+            toko:     fields[2].trim(),
+            harga:    int.tryParse(fields[3].trim()) ?? 0,
+            kontakWa: fields[4].trim(),
+          ),
+        ));
+      } else {
+        // Marker malformed → tampilkan sebagai teks apa adanya
+        widgets.add(MarkdownBody(
+          data: m.group(0)!,
+          selectable: false,
+          extensionSet: md.ExtensionSet.gitHubWeb,
+          styleSheet: _markdownStyleSheet(),
+        ));
+      }
+
+      cursor = m.end;
+    }
+
+    // Sisa teks setelah marker terakhir
+    if (cursor < data.length) {
+      final tail = data.substring(cursor).trim();
+      if (tail.isNotEmpty) {
+        widgets.add(MarkdownBody(
+          data: tail,
+          selectable: false,
+          extensionSet: md.ExtensionSet.gitHubWeb,
+          inlineSyntaxes: [_BreakSyntax()],
+          softLineBreak: true,
+          onTapLink: (text, href, title) {
+            if (href != null) launchUrl(Uri.parse(href));
+          },
+          styleSheet: _markdownStyleSheet(),
+        ));
+      }
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: widgets,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Product Card — kartu rekomendasi produk
+// ---------------------------------------------------------------------------
+
+class _ProductCard extends StatelessWidget {
+  const _ProductCard({
+    required this.idUmkm,
+    required this.motif,
+    required this.toko,
+    required this.harga,
+    required this.kontakWa,
+  });
+
+  final String idUmkm;
+  final String motif;
+  final String toko;
+  final int    harga;
+  final String kontakWa;
+
+  String get _hargaFormatted {
+    if (harga <= 0) return "-";
+    final s = harga.toString();
+    final buf = StringBuffer();
+    for (int i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) buf.write('.');
+      buf.write(s[i]);
+    }
+    return "Rp$buf";
+  }
+
+  Future<void> _openWhatsApp() async {
+    // Normalisasi nomor WA: hapus non-digit, pastikan format internasional
+    var wa = kontakWa.replaceAll(RegExp(r'[^0-9]'), '');
+    if (wa.startsWith('0')) {
+      wa = '62${wa.substring(1)}';
+    }
+    if (wa.isEmpty) return;
+
+    final url = Uri.parse('https://wa.me/$wa');
+    try {
+      if (await canLaunchUrl(url)) {
+        await launchUrl(url, mode: LaunchMode.externalApplication);
+      }
+    } catch (_) {
+      // silently ignore — user bisa coba lagi
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0F1A0F),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: const Color(0xFF16DB65).withValues(alpha: 0.3),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Motif
+          Text(
+            motif,
+            style: GoogleFonts.poppins(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(height: 4),
+
+          // Toko
+          Text(
+            toko,
+            style: GoogleFonts.poppins(
+              color: const Color(0xFFA3A3A3),
+              fontSize: 12,
+            ),
+          ),
+          const SizedBox(height: 8),
+
+          // Harga
+          Row(
+            children: [
+              const Icon(
+                Icons.local_offer_rounded,
+                size: 13,
+                color: Color(0xFF16DB65),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                "$_hargaFormatted / meter",
+                style: GoogleFonts.poppins(
+                  color: const Color(0xFF16DB65),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+
+          // Tombol WhatsApp
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _openWhatsApp,
+              icon: const Icon(Icons.chat_rounded, size: 16),
+              label: Text(
+                "Hubungi via WhatsApp",
+                style: GoogleFonts.poppins(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF16DB65),
+                foregroundColor: Colors.black,
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Markdown syntax helper — <br> support
+// ---------------------------------------------------------------------------
+
+/// flutter_markdown tidak merender HTML, sehingga `<br>` (sering dipakai LLM
+/// di dalam sel tabel, karena tabel Markdown tidak boleh berisi baris baru)
+/// tampil sebagai teks literal. Syntax ini mengubahnya menjadi baris baru.
+class _BreakSyntax extends md.InlineSyntax {
+  _BreakSyntax() : super(r'<[bB][rR]\s*/?>');
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    parser.addNode(md.Text('\n'));
+    return true;
   }
 }
 
@@ -224,6 +475,16 @@ MarkdownStyleSheet _markdownStyleSheet() {
       ),
     ),
     blockquotePadding: const EdgeInsets.only(left: 12),
+    tableHead: GoogleFonts.poppins(
+      fontSize: 13,
+      color: Colors.white,
+      fontWeight: FontWeight.w600,
+    ),
+    tableBody: GoogleFonts.poppins(
+      fontSize: 13,
+      color: Colors.white,
+      height: 1.5,
+    ),
     a: GoogleFonts.poppins(
       fontSize: 14,
       color: const Color(0xFF16DB65),
@@ -232,6 +493,10 @@ MarkdownStyleSheet _markdownStyleSheet() {
     ),
   );
 }
+
+// ---------------------------------------------------------------------------
+// Action chips
+// ---------------------------------------------------------------------------
 
 class ActionChip extends StatelessWidget {
   const ActionChip({
@@ -582,15 +847,7 @@ class StoppedBubble extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     if (response.isNotEmpty) ...[
-                      MarkdownBody(
-                        data: response,
-                        selectable: true,
-                        extensionSet: md.ExtensionSet.gitHubWeb,
-                        onTapLink: (text, href, title) {
-                          if (href != null) launchUrl(Uri.parse(href));
-                        },
-                        styleSheet: _markdownStyleSheet(),
-                      ),
+                      _RichAiContent(data: response),
                       const Divider(
                         color: Color(0xFF2A2A2A),
                         height: 20,

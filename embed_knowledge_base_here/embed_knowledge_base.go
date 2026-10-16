@@ -93,6 +93,7 @@ var (
 		"bot_identity",
 		"social_guard_rail",
 		"knowledge_guard_rail",
+		"product_guard_rail",
 		"memory_block_guard_rail",
 		"memory_summary_block",
 	}

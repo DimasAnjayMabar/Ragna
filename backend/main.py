@@ -1,27 +1,35 @@
 # main.py
 """
-Agribot FastAPI server — main entry point.
+BatikBot FastAPI server — main entry point.
 
 Setup order (important, don't change):
   1. Env var           → MUST be set before importing transformers/torch
   2. Logging/dashboard → before importing controller/pipeline
   3. Silence libraries → before model loading
-  4. Import application → controller, pipeline
-  5. Lifespan          → startup/shutdown hooks
+  4. PromptRegistry    → eager load prompt dari Neo4j (SEBELUM pipeline)
+  5. Import application → controller, pipeline
+  6. Lifespan          → startup/shutdown hooks
 """
 
 # =============================================================================
 # BLOCK 1 — ENV VAR (MUST BE AT THE TOP, before any heavy imports)
 # =============================================================================
 import os
+import sys
 
-# Hugging Face & Transformers — disable progress bars & telemetry
+_THIS_DIR   = os.path.dirname(os.path.abspath(__file__))   # backend/
+_PARENT_DIR = os.path.dirname(_THIS_DIR)                    # chatbot3/
+
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+if _PARENT_DIR not in sys.path:
+    sys.path.insert(0, _PARENT_DIR)
+
+
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
-# ChromaDB — disable telemetry
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 os.environ.setdefault("CHROMA_TELEMETRY_ENABLED", "false")
 
@@ -29,23 +37,16 @@ os.environ.setdefault("CHROMA_TELEMETRY_ENABLED", "false")
 # BLOCK 2 — LOGGING / DASHBOARD SETUP
 # =============================================================================
 import logging
-import sys
 
-dashboard = None  # will be set if TTY mode + dashboard enabled
+dashboard = None
 
-# Detect: are we running in an interactive terminal?
 _is_tty = sys.stdout.isatty()
 _dashboard_enabled = os.environ.get("RAGNA_DASHBOARD", "1") == "1"
 
 if _is_tty and _dashboard_enabled:
-    # ── Dashboard TUI mode ──────────────────────────────────────────────
     try:
         from dashboard import Dashboard
 
-        # Root logger at DEBUG so the DashboardHandler (setLevel DEBUG)
-        # actually receives DEBUG records. Noisy libraries are already
-        # silenced in Block 3, and app loggers (_APP_LOGGERS) are forced
-        # to INFO in Block 3b.
         logging.basicConfig(
             level=logging.DEBUG,
             handlers=[logging.NullHandler()],
@@ -55,7 +56,6 @@ if _is_tty and _dashboard_enabled:
         dashboard = Dashboard(enable=True)
         dashboard.start()
 
-        # File log kept for backup & grep (DEBUG level)
         _fh = logging.FileHandler("ragna.log", encoding="utf-8")
         _fh.setLevel(logging.DEBUG)
         _fh.setFormatter(logging.Formatter(
@@ -65,7 +65,6 @@ if _is_tty and _dashboard_enabled:
         logging.getLogger().addHandler(_fh)
 
     except ImportError:
-        # dashboard.py missing → fall back to plain console logging
         if os.environ.get("RAGNA_PROGRESS", "0") == "1":
             logging.basicConfig(
                 level=logging.INFO,
@@ -82,10 +81,7 @@ if _is_tty and _dashboard_enabled:
             "ℹ️  dashboard.py not found — using plain console logging.\n"
         )
 else:
-    # ── Plain console mode (pipe / CI / non-TTY) ────────────────────────
     if os.environ.get("RAGNA_PROGRESS", "0") == "1":
-        # Go launcher mode — suppress default StreamHandler (which writes
-        # to stderr). GoLogHandler will write JSON to stdout instead.
         logging.basicConfig(
             level=logging.INFO,
             handlers=[logging.NullHandler()],
@@ -101,50 +97,33 @@ else:
 # =============================================================================
 # BLOCK 2b — PROGRESS REPORTER FOR THE GO LAUNCHER
 # =============================================================================
-# Active only when RAGNA_PROGRESS=1 (set by main.go when spawning).
-# Otherwise no-op — zero overhead.
-#
-# This handler is ADDITIVE — it doesn't replace other handlers. Normal
-# logs still get written by the existing handlers (dashboard or console).
-# =============================================================================
 
 if os.environ.get("RAGNA_PROGRESS", "0") == "1":
     try:
         from progress import install_go_log_handler
         install_go_log_handler()
     except ImportError:
-        # progress.py missing — skip (non-fatal)
         pass
 
 
 # =============================================================================
 # BLOCK 3 — SILENCE NOISY LIBRARIES
 # =============================================================================
-# Lower the log level of libraries that normally spam at INFO/DEBUG.
-# Important logs (WARNING/ERROR) still appear.
-# =============================================================================
 
 _NOISY_LOGGERS = {
-    # Vector DB
     "chromadb":                            logging.WARNING,
     "chromadb.telemetry":                  logging.ERROR,
     "chromadb.telemetry.product.posthog":  logging.CRITICAL,
     "chromadb.api":                        logging.WARNING,
     "chromadb.segment":                    logging.WARNING,
-
-    # Graph DB
     "neo4j":                               logging.WARNING,
     "neo4j.pool":                          logging.WARNING,
     "neo4j.io":                            logging.WARNING,
-
-    # HTTP clients
     "urllib3":                             logging.WARNING,
     "urllib3.connectionpool":              logging.WARNING,
     "httpx":                               logging.WARNING,
     "httpcore":                            logging.WARNING,
     "requests":                            logging.WARNING,
-
-    # ML / DL framework
     "transformers":                        logging.WARNING,
     "transformers.modeling_utils":         logging.ERROR,
     "transformers.configuration_utils":    logging.ERROR,
@@ -153,22 +132,14 @@ _NOISY_LOGGERS = {
     "torch":                               logging.WARNING,
     "torch._dynamo":                       logging.ERROR,
     "torch._inductor":                     logging.ERROR,
-
-    # Vision
     "PIL":                                 logging.WARNING,
     "PIL.Image":                           logging.WARNING,
-
-    # LLM / API clients
     "google.generativeai":                 logging.WARNING,
     "groq":                                logging.WARNING,
-
-    # Dev tooling
     "watchfiles":                          logging.WARNING,
     "watchfiles.main":                     logging.WARNING,
-    "uvicorn.error":                       logging.INFO,   # still visible
-    "uvicorn.access":                      logging.INFO,   # still visible
-
-    # Multipart upload
+    "uvicorn.error":                       logging.INFO,
+    "uvicorn.access":                      logging.INFO,
     "multipart":                           logging.WARNING,
     "python_multipart":                    logging.WARNING,
 }
@@ -178,17 +149,7 @@ for _name, _lvl in _NOISY_LOGGERS.items():
 
 
 # =============================================================================
-# BLOCK 3b — APPLICATION LOGGERS (controller, service, middleware)
-# =============================================================================
-# Ensure our own app loggers are always at INFO and propagate to the
-# root logger → automatically routed to the dashboard.
-#
-# Mapping in dashboard.py:
-#   "controller.*"  → SERVER panel  (see CHANNEL_RULES)
-#   "service.*"     → default fallback "server"
-#   "ragna"         → PIPELINE panel (see CHANNEL_RULES)
-#   "api.access"    → default fallback "server" (from RequestLoggerMiddleware)
-#   "main"          → INIT panel (CHANNEL_RULES: main → init)
+# BLOCK 3b — APPLICATION LOGGERS
 # =============================================================================
 
 _APP_LOGGERS = (
@@ -216,13 +177,195 @@ logger = logging.getLogger("main")
 
 
 # =============================================================================
-# BLOCK 4 — APPLICATION IMPORTS
+# BLOCK 4 — PROMPT REGISTRY (Eager Load)
+# =============================================================================
+# PromptRegistry: eager load semua prompt dari Neo4j saat startup.
+# Fallback ke FALLBACK_PROMPTS[config.py] kalau Neo4j kosong/gagal.
+#
+# Zero I/O saat runtime — semua dari in-memory dict.
+# Reload via POST /admin/reload-prompts (dipanggil editor Go setelah embed).
+#
+# Struktur cache: {lang: {slot: text}}
+# Slot names:
+#   bot_name, bot_identity, social_guard_rail, knowledge_guard_rail,
+#   product_guard_rail, memory_block_guard_rail, memory_summary_block
+# =============================================================================
+
+import threading
+from typing import Dict, Optional
+
+from neo4j import GraphDatabase
+from config import FALLBACK_PROMPTS, CONFIG
+
+
+class PromptRegistry:
+    """
+    Singleton registry untuk semua prompt LLM.
+
+    - load_all()      : eager load dari Neo4j + fallback config
+    - get(lang, slot) : runtime lookup (no I/O, no lock)
+    - reload()        : panggil ulang load_all() — dipakai endpoint admin
+    """
+
+    _instance: Optional["PromptRegistry"] = None
+    _instance_lock = threading.Lock()
+
+    @classmethod
+    def get(cls) -> "PromptRegistry":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    # Slot yang WAJIB ada di setiap lang. Kalau tidak ada di Neo4j,
+    # akan diambil dari FALLBACK_PROMPTS.
+    REQUIRED_SLOTS = (
+        "bot_name",
+        "bot_identity",
+        "social_guard_rail",
+        "knowledge_guard_rail",
+        "product_guard_rail",
+        "memory_block_guard_rail",
+        "memory_summary_block",
+    )
+
+    def __init__(self):
+        self._cache: Dict[str, Dict[str, str]] = {}
+        self._stats: Dict[str, int] = {
+            "from_neo4j": 0,
+            "from_fallback": 0,
+            "missing": 0,
+        }
+        self._loaded = False
+        self._lock = threading.Lock()
+        self._driver = None
+
+    # ── Startup load ──────────────────────────────────────────────────────
+
+    def load_all(self) -> None:
+        """
+        Eager load semua prompt dari Neo4j.
+        Kalau Neo4j kosong / gagal → fallback ke FALLBACK_PROMPTS.
+        Dipanggil SEKALI saat startup, sebelum server ready.
+        """
+        with self._lock:
+            logger.info("[PromptRegistry] Eager loading prompts from Neo4j...")
+
+            new_cache: Dict[str, Dict[str, str]] = {}
+            stats = {"from_neo4j": 0, "from_fallback": 0, "missing": 0}
+
+            # ── 1. Query Neo4j ────────────────────────────────────────────
+            try:
+                if self._driver is None:
+                    self._driver = GraphDatabase.driver(
+                        CONFIG["neo4j_uri"],
+                        auth=(CONFIG["neo4j_user"], CONFIG["neo4j_password"]),
+                    )
+                with self._driver.session() as session:
+                    records = session.run("""
+                        MATCH (i:Instruction)
+                        RETURN i.lang AS lang, i.slot AS slot, i.text AS text
+                    """).data()
+
+                for r in records:
+                    lang = r.get("lang")
+                    slot = r.get("slot")
+                    text = r.get("text")
+                    if lang and slot and text:
+                        new_cache.setdefault(lang, {})[slot] = text
+                        stats["from_neo4j"] += 1
+
+                logger.info(
+                    "[PromptRegistry] Neo4j returned %d slots across %d langs",
+                    stats["from_neo4j"], len(new_cache),
+                )
+            except Exception as exc:
+                logger.error("[PromptRegistry] Neo4j query failed: %s", exc)
+                logger.warning(
+                    "[PromptRegistry] Falling back to FALLBACK_PROMPTS for all slots"
+                )
+
+            # ── 2. Fallback untuk slot yang kosong ────────────────────────
+            # Iterasi semua lang yang ada di FALLBACK_PROMPTS (id, en)
+            for lang, fallback_slots in FALLBACK_PROMPTS.items():
+                for slot in self.REQUIRED_SLOTS:
+                    if slot in new_cache.get(lang, {}):
+                        continue  # sudah ada dari Neo4j
+                    text = fallback_slots.get(slot)
+                    if text:
+                        new_cache.setdefault(lang, {})[slot] = text
+                        stats["from_fallback"] += 1
+                    else:
+                        stats["missing"] += 1
+                        logger.warning(
+                            "[PromptRegistry] Slot '%s' missing for lang='%s' "
+                            "(no Neo4j, no fallback)",
+                            slot, lang,
+                        )
+
+            # ── 3. Atomic swap ────────────────────────────────────────────
+            self._cache = new_cache
+            self._stats = stats
+            self._loaded = True
+
+            logger.info(
+                "[PromptRegistry] Loaded — from_neo4j=%d  from_fallback=%d  "
+                "missing=%d  langs=%s",
+                stats["from_neo4j"],
+                stats["from_fallback"],
+                stats["missing"],
+                sorted(new_cache.keys()),
+            )
+
+    # ── Reload (endpoint admin) ───────────────────────────────────────────
+
+    def reload(self) -> Dict[str, int]:
+        """Reload cache — dipanggil setelah editor Go selesai embed."""
+        logger.info("[PromptRegistry] Reload requested via admin endpoint")
+        self.load_all()
+        return dict(self._stats)
+
+    # ── Runtime read (no lock, no I/O) ────────────────────────────────────
+
+    def lookup(self, lang: str, slot: str) -> Optional[str]:
+        """
+        Ambil prompt dari cache. Pure dict lookup, zero I/O.
+        Return None kalau tidak ada.
+        """
+        return self._cache.get(lang, {}).get(slot)
+
+    def has(self, lang: str, slot: str) -> bool:
+        return slot in self._cache.get(lang, {})
+
+    def list_slots(self, lang: str) -> list:
+        return sorted(self._cache.get(lang, {}).keys())
+
+    @property
+    def stats(self) -> Dict[str, int]:
+        return dict(self._stats)
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+    def close(self):
+        if self._driver is not None:
+            try:
+                self._driver.close()
+            except Exception:
+                pass
+            self._driver = None
+
+
+# =============================================================================
+# BLOCK 5 — APPLICATION IMPORTS
 # =============================================================================
 import time as _time
 import uvicorn
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -233,18 +376,49 @@ from pipeline import get_rag_pipeline
 
 
 # =============================================================================
-# BLOCK 5 — LIFESPAN (startup / shutdown)
+# BLOCK 6 — LIFESPAN (startup / shutdown)
 # =============================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ─────────────────────────────────────────────────────────
-    logger.info("Loading RAG pipeline at startup...")
+    logger.info("=" * 60)
+    logger.info("BatikBot server — startup sequence")
+    logger.info("=" * 60)
+
+    # Step 1: Eager load PromptRegistry — WAJIB sebelum pipeline
+    logger.info("Step 1/2: Eager loading PromptRegistry...")
+    try:
+        registry = PromptRegistry.get()
+        registry.load_all()
+
+        if not registry.is_loaded:
+            raise RuntimeError("PromptRegistry gagal load — server tidak boleh start")
+
+        logger.info(
+            "✓ PromptRegistry ready — neo4j=%d fallback=%d missing=%d",
+            registry.stats["from_neo4j"],
+            registry.stats["from_fallback"],
+            registry.stats["missing"],
+        )
+    except Exception as e:
+        logger.critical("Failed to load PromptRegistry: %s", e)
+        if os.environ.get("RAGNA_PROGRESS", "0") == "1":
+            try:
+                from progress import fatal_error
+                fatal_error(str(e), phase="init")
+            except ImportError:
+                pass
+        if dashboard is not None:
+            dashboard.stop()
+        raise
+
+    # Step 2: Load RAG pipeline
+    logger.info("Step 2/2: Loading RAG pipeline...")
     try:
         get_rag_pipeline()
-        logger.info("RAG pipeline ready.")
+        logger.info("✓ RAG pipeline ready.")
 
-        # Signal the Go launcher that the server is ready
         if os.environ.get("RAGNA_PROGRESS", "0") == "1":
             try:
                 from progress import ready
@@ -255,7 +429,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.critical("Failed to load RAG pipeline: %s", e)
 
-        # Signal fatal error to the Go launcher
         if os.environ.get("RAGNA_PROGRESS", "0") == "1":
             try:
                 from progress import fatal_error
@@ -263,10 +436,13 @@ async def lifespan(app: FastAPI):
             except ImportError:
                 pass
 
-        # Stop the dashboard before raising so the terminal isn't messy
         if dashboard is not None:
             dashboard.stop()
         raise
+
+    logger.info("=" * 60)
+    logger.info("✓ Server ready — accepting requests")
+    logger.info("=" * 60)
 
     yield  # ── Server runs here ─────────────────────────────────────────
 
@@ -282,7 +458,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Failed to close RAG pipeline: %s", e)
 
-    # Stop the dashboard last so shutdown logs remain visible
+    # Close PromptRegistry
+    try:
+        registry = PromptRegistry.get()
+        registry.close()
+        logger.info("PromptRegistry closed.")
+    except Exception as e:
+        logger.warning("Failed to close PromptRegistry: %s", e)
+
     if dashboard is not None:
         try:
             dashboard.stop()
@@ -291,51 +474,33 @@ async def lifespan(app: FastAPI):
 
 
 # =============================================================================
-# BLOCK 6 — FASTAPI APP
+# BLOCK 7 — FASTAPI APP
 # =============================================================================
 
 app = FastAPI(
-    title="Agribot API",
-    description="Backend API for the Agribot AI-powered chatbot",
+    title="BatikBot API",
+    description="Backend API for the BatikBot AI-powered chatbot",
     version="1.0.0",
     lifespan=lifespan,
 )
 
-# ── CORS ────────────────────────────────────────────────────────────────
-# NOTE:
-#   Combining allow_origins=["*"] + allow_credentials=True is FORBIDDEN
-#   by browsers. If forced, preflight OPTIONS fails silently → the real
-#   request is never sent → DevTools Network shows nothing (the classic
-#   "Flutter Web no network" symptom).
-#
-#   We use origin_regex to be flexible in dev (localhost, LAN, etc.)
-#   without wildcard + credentials. Since auth uses Bearer tokens (not
-#   cookies), allow_credentials=False is fine.
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https?://.*",   # permissive for dev; tighten in prod
-    allow_credentials=False,             # Bearer token → no cookies needed
+    allow_origin_regex=r"https?://.*",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
-    max_age=600,                         # cache preflight for 10 minutes
+    max_age=600,
 )
 
 
 # ── Request Logger Middleware ───────────────────────────────────────────
-# Every HTTP request in/out is logged via the "api.access" logger
-# → routed to the SERVER panel automatically (fallback mapping default).
-#
-# IMPORTANT: must be added AFTER CORS so it becomes the outermost
-# middleware (sees all requests, including preflight OPTIONS).
-# =============================================================================
-
 _access_logger = logging.getLogger("api.access")
 
 
 class RequestLoggerMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Preflight OPTIONS — short log only (avoid spamming the panel)
         if request.method == "OPTIONS":
             response = await call_next(request)
             _access_logger.debug(
@@ -379,9 +544,6 @@ app.add_middleware(RequestLoggerMiddleware)
 # ── Exception handler ───────────────────────────────────────────────────
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    # Preflight OPTIONS MUST always get a CORS-valid response.
-    # If this handler swallows it, the browser never sends the real
-    # request → "Flutter Web no network".
     if request.method == "OPTIONS":
         return JSONResponse(status_code=200, content={})
 
@@ -402,58 +564,84 @@ app.include_router(chats_router)
 async def root():
     return {
         "status":  "online",
-        "message": "Agribot Backend is running successfully",
+        "message": "BatikBot Backend is running successfully",
         "agent":   "FastAPI",
     }
 
 
 # =============================================================================
-# BLOCK 6b — ADMIN ENDPOINTS (OPTIONAL)
-# =============================================================================
-# These endpoints are useful when prompt_guard.py is run via Go (a
-# separate process) — the server doesn't know about new instructions.
-# Call this endpoint after embedding instructions to refresh the cache.
-#
-# ENABLE ONLY IF NEEDED (uncomment this block).
-# Protect with an API key / auth before using in production.
+# BLOCK 8 — ADMIN ENDPOINTS
 # =============================================================================
 
-# from fastapi import Header
-#
-# @app.post("/admin/invalidate-instruction-cache", tags=["Admin"])
-# async def invalidate_instruction_cache_endpoint(
-#     x_admin_key: str = Header(default=""),
-# ):
-#     # Change "secret" to a secure API key
-#     if x_admin_key != os.environ.get("ADMIN_API_KEY", "secret"):
-#         return JSONResponse(status_code=403, content={"success": False, "message": "Forbidden"})
-#
-#     try:
-#         from pipeline import invalidate_instruction_cache
-#         invalidate_instruction_cache()
-#         logger.info("[Admin] Instruction cache invalidated via endpoint.")
-#         return {"success": True, "message": "Instruction cache invalidated."}
-#     except Exception as e:
-#         logger.exception("[Admin] Failed to invalidate cache: %s", e)
-#         return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+@app.post("/admin/reload-prompts", tags=["Admin"])
+async def reload_prompts(
+    x_admin_secret: str = Header(default=""),
+):
+    """
+    Reload prompt cache dari Neo4j.
+    Dipanggil oleh editor Go (embed_knowledge_base.go) setelah 'Save & Embed'.
+    """
+    expected_secret = os.environ.get("ADMIN_SECRET", "")
+    if expected_secret and x_admin_secret != expected_secret:
+        logger.warning("[Admin] Reload rejected — invalid secret")
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "Forbidden"},
+        )
+
+    try:
+        registry = PromptRegistry.get()
+        stats = registry.reload()
+        logger.info("[Admin] Prompt cache reloaded → %s", stats)
+        return {
+            "success": True,
+            "message": "Prompt cache reloaded.",
+            "data": stats,
+        }
+    except Exception as e:
+        logger.exception("[Admin] Failed to reload prompt cache: %s", e)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": str(e)},
+        )
+
+
+@app.get("/admin/prompt-status", tags=["Admin"])
+async def prompt_status(
+    x_admin_secret: str = Header(default=""),
+):
+    """
+    Debug endpoint: cek slot apa saja yang ter-load per lang.
+    Berguna untuk verifikasi tanpa restart server.
+    """
+    expected_secret = os.environ.get("ADMIN_SECRET", "")
+    if expected_secret and x_admin_secret != expected_secret:
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "Forbidden"},
+        )
+
+    registry = PromptRegistry.get()
+    return {
+        "success": True,
+        "data": {
+            "is_loaded": registry.is_loaded,
+            "stats": registry.stats,
+            "langs": {
+                lang: registry.list_slots(lang)
+                for lang in ["id", "en"]
+            },
+        },
+    }
 
 
 # =============================================================================
-# BLOCK 7 — ENTRY POINT
+# BLOCK 9 — ENTRY POINT
 # =============================================================================
 
 if __name__ == "__main__":
-    # Default OFF — so `python main.py` run directly doesn't emit JSON.
-    # main.go sets RAGNA_PROGRESS=1 when spawning.
     os.environ.setdefault("RAGNA_PROGRESS", "0")
 
-    # reload=True conflicts with the dashboard.
-    # The uvicorn reloader runs main.py in both parent and child processes,
-    # causing Dashboard() to be instantiated multiple times → multiple
-    # renderer threads → CLEAR_SCREEN races → screen glitches.
-    #
-    # When dashboard is active, force reload=False. When inactive
-    # (non-TTY / RAGNA_DASHBOARD=0), reload stays True for dev convenience.
     _use_reload = dashboard is None
 
     if not _use_reload:
@@ -461,8 +649,6 @@ if __name__ == "__main__":
     else:
         logger.info("[Entry] Dashboard inactive — reload=True for dev.")
 
-    # Important: log_config=None → uvicorn doesn't override our logging setup.
-    # All uvicorn logs go to the root logger → routed to the dashboard.
     uvicorn.run(
         "main:app",
         host="0.0.0.0",

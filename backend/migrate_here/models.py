@@ -190,3 +190,21 @@ class Documents(Base):
     __tablename__ = "documents"
     id = Column(Integer, primary_key=True, index=True)
     hash_value = Column(Text, unique=True, index=True)
+
+class UmkmBatik(Base):
+    __tablename__ = "umkm_batik"
+
+    id                = Column(Integer, primary_key=True, index=True)
+    id_umkm           = Column(String(20),  index=True, nullable=False)
+    nama_umkm         = Column(String(200), nullable=False)
+    nama_motif        = Column(String(100), index=True, nullable=False)
+    harga_per_meter   = Column(Integer, nullable=True)
+    kontak_wa         = Column(String(20), nullable=False)
+    alamat            = Column(Text, nullable=True)
+
+    # Disimpan untuk keperluan lain, tidak dipakai di MVP product card
+    harga_kemeja_jadi = Column(Integer, nullable=True)
+    harga_kiloan      = Column(Integer, nullable=True)
+    file_gambar       = Column(String(200), nullable=True)
+
+    created_at        = Column(DateTime, default=datetime.datetime.utcnow)

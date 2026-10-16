@@ -1,15 +1,14 @@
 # pipeline.py
 """
-RAG Pipeline — orchestrates two separate pipelines with a defense layer
-for prompt injection.
+RAG Pipeline — orchestrates retrieval, enrichment, rerank, generation.
+
+PromptRegistry lives in main.py. Pipeline accesses it lazily via
+_get_prompt_registry() to avoid circular import (main → pipeline → main).
 
 Log channels:
   - "init"     → during model loading (embedding, reranker, NLP, Groq client)
   - "pipeline" → during query processing (retrieval, rerank, generation)
   - "server"   → fallback for logs not wrapped in a context tag
-
-Logging setup is NOT done here — it's done in main.py (server) or
-embedder.py (standalone).
 """
 
 import logging
@@ -47,7 +46,7 @@ from transformers import (
 
 from config import (
     CONFIG,
-    PROMPTS,
+    FALLBACK_PROMPTS,
     set_llm_mode,
     list_local_models,
     GROQ_MODEL_SAFE_TOKEN_BUDGET,
@@ -59,7 +58,6 @@ load_dotenv()
 # =============================================================================
 # CONTEXT TAG FOR DASHBOARD
 # =============================================================================
-# If dashboard.py is not available, fall back to a no-op stub.
 try:
     from dashboard import log_context
 except ImportError:
@@ -71,7 +69,6 @@ except ImportError:
 # =============================================================================
 # IMPORT PROGRESS REPORTER (for Go launcher)
 # =============================================================================
-# If progress.py is not available, fall back to no-op stubs.
 try:
     from progress import (
         step_start,
@@ -95,11 +92,47 @@ log = logging.getLogger("ragna")
 
 
 # =============================================================================
+# PROMPT REGISTRY — LAZY ACCESSOR
+# =============================================================================
+# PromptRegistry hidup di main.py. Import lazy untuk hindari circular import.
+# =============================================================================
+
+def _get_prompt_registry():
+    """Lazy import PromptRegistry dari main.py."""
+    from main import PromptRegistry
+    return PromptRegistry.get()
+
+
+def _get_prompt(lang: str, slot: str, required: bool = True) -> Optional[str]:
+    try:
+        registry = _get_prompt_registry()
+        text = registry.lookup(lang, slot)   # ← FIX
+        if text is not None:
+            return text
+    except Exception as exc:
+        log.warning(
+            "[PromptRegistry] Gagal akses registry untuk lang=%s slot=%s: %s",
+            lang, slot, exc,
+        )
+
+    # ── Fallback ke FALLBACK_PROMPTS ──────────────────────────────────────
+    fallback = FALLBACK_PROMPTS.get(lang, {}).get(slot)
+    if fallback is not None:
+        log.debug("[Prompt] Fallback → lang=%s slot=%s", lang, slot)
+        return fallback
+
+    if required:
+        raise RuntimeError(
+            f"Prompt tidak ditemukan: lang={lang} slot={slot}. "
+            f"Cek instruction_set.md atau FALLBACK_PROMPTS di config.py."
+        )
+    return None
+
+
+# =============================================================================
 # PROMPT INJECTION SCANNER
 # =============================================================================
 
-# P0-B: cache stores (data, timestamp) tuples for TTL.
-#       Only populated on successful Neo4j query.
 _INSTRUCTION_CACHE:      Dict[str, Tuple[List[Dict], float]] = {}
 _INSTRUCTION_CACHE_LOCK  = threading.Lock()
 _INSTRUCTION_CACHE_TTL   = 300  # seconds — 5 minutes; 0 to disable TTL
@@ -170,7 +203,7 @@ class RAGResponse:
     retrieval_time:  float = 0.0
     enrichment_time: float = 0.0
     rerank_time:     float = 0.0
-    intent:          str = "knowledge"  # 'knowledge' | 'social' | 'blocked' | 'vision'
+    intent:          str = "knowledge"  # 'knowledge' | 'social' | 'product' | 'blocked' | 'vision'
 
 
 # =============================================================================
@@ -199,8 +232,6 @@ class RAGModels:
             pass
 
     def __new__(cls, embedding_only: bool = False):
-        # If instance already exists but embedding_only is requested,
-        # return the same instance anyway (more efficient).
         if cls._instance is None:
             instance = super().__new__(cls)
             instance._initialize(embedding_only=embedding_only)
@@ -208,7 +239,6 @@ class RAGModels:
         return cls._instance
 
     def _initialize(self, embedding_only: bool = False):
-        # ── All model loading logs go to the INIT panel ─────────────────
         with log_context("init"):
             log.info(
                 "Starting RAG model loading%s...",
@@ -217,7 +247,6 @@ class RAGModels:
 
             self._embedding_only = embedding_only
 
-            # ── Default state ────────────────────────────────────────────
             self.llm_mode        = "groq"
             self.local_llm       = None
             self.local_tokenizer = None
@@ -318,22 +347,15 @@ class RAGModels:
             phase_done("init", time.perf_counter() - _t)
             log.info("✓ All models loaded successfully.")
 
-    # ── Alias properties (kept for backward compatibility) ────────────────
-
     @property
     def reranker(self) -> CrossEncoder:
-        """Return the reranker (loaded in _initialize)."""
         return self._reranker
 
     @property
     def groq_client(self) -> Groq:
-        """Return the Groq client (loaded in _initialize)."""
         return self._groq_client
 
-    # ── Embedding helpers ─────────────────────────────────────────────────
-
     def get_embedding(self, text: str) -> List[float]:
-        """Embed a single text → float vector (GPU, no_grad, thread-safe)."""
         with self.embedding_lock:
             with torch.no_grad():
                 return self.embedding_model.encode(
@@ -341,7 +363,6 @@ class RAGModels:
                 ).tolist()
 
     def embed_batch_safe(self, texts: List[str]) -> List[List[float]]:
-        """Embed a batch of texts → list of float vectors (GPU, no_grad, thread-safe)."""
         with self.embedding_lock:
             with torch.no_grad():
                 embeddings = self.embedding_model.encode(
@@ -352,15 +373,12 @@ class RAGModels:
                 return [e.tolist() for e in embeddings]
 
     def rerank(self, query: str, texts: List[str]) -> List[float]:
-        """Cross-encoder scoring (query, text) on GPU."""
         if not texts:
             return []
         pairs = [[query, t] for t in texts]
         with torch.no_grad():
             scores = self._reranker.predict(pairs)
         return scores.tolist() if hasattr(scores, "tolist") else list(scores)
-
-    # ── NLP constants ─────────────────────────────────────────────────────
 
     _ID_STOPWORDS = {
         "yang", "dan", "di", "ke", "dari", "ini", "itu",
@@ -371,16 +389,14 @@ class RAGModels:
         "jelaskan", "sebutkan", "coba", "tolong", "mohon",
     }
 
+    # Domain vocab: dipakai untuk skip typo-correction pada kata teknis batik.
     _DOMAIN_VOCAB = {
-        "fusarium", "antraknosa", "nematoda", "aflatoksin", "alternaria",
-        "pythium", "phytophthora", "rhizoctonia", "sclerotinia", "botrytis",
-        "xanthomonas", "pseudomonas", "erwinia", "agrobacterium", "ralstonia",
-        "tungro", "blas", "kresek", "hawar", "busuk", "layu", "bercak",
-        "embun", "tepung", "karat", "virus", "bakteri", "jamur", "cendawan",
-        "aphid", "thrips", "whitefly", "mealybug", "wereng", "penggerek",
-        "ulat", "kutu", "tungau", "nematoda", "belalang", "lalat",
-        "kentang", "tomat", "cabai", "jagung", "padi", "kedelai", "singkong",
-        "ubi", "terong", "bawang", "wortel", "kubis", "selada", "kangkung",
+        "batik", "motif", "kain", "canting", "malam", "wax", "tulis", "cap",
+        "pewarna", "indigo", "sogan", "trenggalek",
+        "turonggo", "yakso", "cengkehan", "gajah", "nungguk",
+        "pari", "srono", "manggis", "batu", "tumpuk", "kopi",
+        "sekar", "jagad", "biru", "mutiara", "menak", "sopal",
+        "ngalum", "widodo", "krajan",
     }
 
     def correct_typo_mlm(self, text: str) -> str:
@@ -460,7 +476,7 @@ class RAGModels:
                 extra = " ".join(keywords[:10])
                 log.debug("[NLP-ID] keywords: %s", extra)
 
-            else:  # lang == 'en'
+            else:
                 ner_results = self.nlp_en_pipeline(text)
                 keywords = list(dict.fromkeys(
                     entity["word"]
@@ -502,7 +518,6 @@ class ChromaRetriever:
         query_embedding: List[float],
         k: int = CONFIG["chroma_retrieval_k"],
     ) -> List[CandidateChunk]:
-        """Retrieve the k most similar chunks to query_embedding."""
         try:
             results = self.collection.query(
                 query_embeddings=[query_embedding],
@@ -535,7 +550,7 @@ class ChromaRetriever:
 
 
 # =============================================================================
-# STAGE 2 — NEO4J ENRICHER — P0-A: FILTER QUARANTINED IN CYPHER
+# STAGE 2 — NEO4J ENRICHER
 # =============================================================================
 
 class Neo4jEnricher:
@@ -558,7 +573,6 @@ class Neo4jEnricher:
                 log.info("Neo4j: %s (connected)", uri)
                 break
             except Exception as e:
-                # P1: use log.warning (not print) so the dashboard TUI isn't corrupted.
                 if waited == 0:
                     log.warning("⚠️  Neo4j is not active at %s", uri)
                     log.warning("   Please activate Neo4j now. Waiting for connection...")
@@ -584,12 +598,6 @@ class Neo4jEnricher:
         candidates: List[CandidateChunk],
         context_window: int = CONFIG["context_window"],
     ) -> List[EnrichedChunk]:
-        """
-        Run a single Cypher UNWIND for all isi_ids at once.
-
-        P0-A: quarantined chunks MUST NOT enter context_text.
-              Target, prev, and next are all filtered.
-        """
         if not candidates:
             return []
 
@@ -673,21 +681,90 @@ class Neo4jEnricher:
 
 
 # =============================================================================
-# MAIN PIPELINE — ROUTER + 2 SEPARATE PATHS
+# PRODUCT TOOL — SQL QUERY UNTUK REKOMENDASI
+# =============================================================================
+
+class ProductTool:
+    """
+    Query produk UMKM batik dari tabel umkm_batik.
+    Memakai SessionLocal dari database.py.
+    """
+    def __init__(self):
+        from database import SessionLocal
+        self.SessionLocal = SessionLocal
+        log.info("ProductTool ready (via SessionLocal)")
+
+    def search(
+        self,
+        keyword:   Optional[str] = None,
+        motif:     Optional[str] = None,
+        max_harga: Optional[int] = None,
+        limit:     int = 5,
+    ) -> List[Dict]:
+        from migrate_here.models import UmkmBatik
+        from sqlalchemy import or_
+
+        db = self.SessionLocal()
+        try:
+            q = db.query(UmkmBatik)
+
+            if keyword:
+                q = q.filter(or_(
+                    UmkmBatik.nama_motif.ilike(f"%{keyword}%"),
+                    UmkmBatik.nama_umkm.ilike(f"%{keyword}%"),
+                ))
+            if motif:
+                q = q.filter(UmkmBatik.nama_motif.ilike(f"%{motif}%"))
+            if max_harga:
+                q = q.filter(UmkmBatik.harga_per_meter <= max_harga)
+
+            rows = q.limit(limit).all()
+            return [{
+                "id_umkm":         r.id_umkm,
+                "nama_umkm":       r.nama_umkm,
+                "nama_motif":      r.nama_motif,
+                "harga_per_meter": r.harga_per_meter,
+                "kontak_wa":       r.kontak_wa,
+                "alamat":          r.alamat,
+            } for r in rows]
+        finally:
+            db.close()
+
+
+# =============================================================================
+# MAIN PIPELINE
 # =============================================================================
 
 class RAGPipeline:
     """
-    Orchestrates two separate pipelines with a defense layer for prompt injection.
+    Orchestrates knowledge / social / product pipelines with a defense layer
+    for prompt injection.
     """
 
     def __init__(self):
-        # ── All pipeline init logs go to the INIT panel ─────────────────
         with log_context("init"):
             log.info("Initializing RAGPipeline...")
             self.models = RAGModels()
             self.chroma = ChromaRetriever()
             self.neo4j  = Neo4jEnricher()
+            self.product_tool = ProductTool()
+
+            # Cek PromptRegistry — hanya log, tidak crash
+            try:
+                registry = _get_prompt_registry()
+                if registry.is_loaded:
+                    log.info(
+                        "[Pipeline] PromptRegistry ready — neo4j=%d fallback=%d",
+                        registry.stats["from_neo4j"],
+                        registry.stats["from_fallback"],
+                    )
+                else:
+                    log.warning(
+                        "[Pipeline] PromptRegistry not loaded — will use FALLBACK_PROMPTS"
+                    )
+            except Exception as exc:
+                log.warning("[Pipeline] PromptRegistry unavailable: %s", exc)
+
             log.info("✓ RAGPipeline ready.")
 
     def close(self):
@@ -703,9 +780,6 @@ class RAGPipeline:
         user_id:      int | None = None,
         base64_image: str | None = None,
     ) -> RAGResponse:
-        """
-        Main entry point. Detects intent and delegates to the appropriate pipeline.
-        """
         with log_context("pipeline"):
             if base64_image:
                 log.info("═" * 60)
@@ -730,7 +804,6 @@ class RAGPipeline:
                         intent="vision_error",
                     )
 
-                # Scan query text (not image) before merging
                 if query and query.strip():
                     _vlang = self._detect_language(query)
                     _vscan = self._scan_query(query, lang=_vlang)
@@ -749,20 +822,18 @@ class RAGPipeline:
                             intent="blocked",
                         )
 
-                # Merge vision output with the original query
                 if query.strip() and query.strip() != "Tolong jelaskan gambar tanaman ini.":
                     enriched_query = (
-                        f"Pengguna mengunggah gambar dengan hasil analisis visi dari pakar berikut:\n"
+                        f"Pengguna mengunggah gambar dengan hasil analisis visi berikut:\n"
                         f"'{image_description}'\n\n"
                         f"Berdasarkan analisis visual tersebut, pengguna bertanya: '{query}'. "
                         f"Tolong berikan jawaban yang komprehensif."
                     )
                 else:
                     enriched_query = (
-                        f"Pengguna mengunggah gambar dengan hasil analisis visi dari pakar berikut:\n"
+                        f"Pengguna mengunggah gambar dengan hasil analisis visi berikut:\n"
                         f"'{image_description}'\n\n"
-                        f"Tolong jelaskan kondisi tanaman tersebut, kemungkinan penyebab, "
-                        f"dan cara penanganannya."
+                        f"Tolong jelaskan kondisi pada gambar tersebut."
                     )
 
                 log.info("[Vision RAG] Step 2: Sending merged text to Knowledge Retrieval pipeline...")
@@ -804,6 +875,11 @@ class RAGPipeline:
                     query, chat_id=chat_id, stop_event=stop_event, user_id=user_id
                 )
 
+            if intent == "product":
+                return self.process_product_query(
+                    query, chat_id=chat_id, stop_event=stop_event, user_id=user_id
+                )
+
             if rag_mode == "regular":
                 log.info("[Router] Using Regular RAG pipeline")
                 return self.process_regular_query(
@@ -817,20 +893,9 @@ class RAGPipeline:
     # ── Scanner helpers ────────────────────────────────────────────────────
 
     def _get_cached_instructions(self, lang: str) -> List[Dict]:
-        """
-        Fetch instruction set from Neo4j for a given language.
-
-        P0-B: results are ONLY cached on successful Neo4j queries.
-              On exception, [] is returned but NOT cached, so the next
-              attempt will retry the Neo4j query (prevents permanently
-              disabled guard until restart).
-
-        P3:   TTL cache — old instructions auto-refresh after
-              _INSTRUCTION_CACHE_TTL seconds. Set 0 to disable TTL.
-        """
+        """Fetch instruction set from Neo4j for a given language."""
         now = time.time()
 
-        # ── Cache lookup (with TTL) ──────────────────────────────────────
         with _INSTRUCTION_CACHE_LOCK:
             entry = _INSTRUCTION_CACHE.get(lang)
             if entry is not None:
@@ -839,7 +904,6 @@ class RAGPipeline:
                     return cached_data
                 _INSTRUCTION_CACHE.pop(lang, None)
 
-        # ── Query Neo4j ───────────────────────────────────────────────────
         try:
             with self.neo4j.driver.session() as session:
                 result = session.run(
@@ -866,7 +930,6 @@ class RAGPipeline:
                 sum(len(i["patterns"]) for i in instructions),
             )
 
-            # P0-B: ONLY cache on success
             with _INSTRUCTION_CACHE_LOCK:
                 _INSTRUCTION_CACHE[lang] = (instructions, now)
 
@@ -878,7 +941,6 @@ class RAGPipeline:
                 "Cache NOT updated so the next attempt can retry.",
                 lang, exc_info=False,
             )
-            # P0-B: do NOT cache []
             return []
 
     def _scan_query(self, query: str, lang: str = "id") -> Dict:
@@ -920,13 +982,13 @@ class RAGPipeline:
         if reason == "social":
             msg = (
                 "Maaf, saya tidak dapat memproses permintaan ini. "
-                "Silakan ajukan pertanyaan seputar penyakit dan hama tanaman."
+                "Silakan ajukan pertanyaan seputar batik Trenggalek."
             )
         else:
             msg = (
                 "Maaf, saya tidak dapat memproses permintaan ini karena "
                 "terdeteksi pola yang tidak sesuai dengan pedoman saya. "
-                "Silakan ajukan pertanyaan seputar penyakit dan hama tanaman."
+                "Silakan ajukan pertanyaan seputar batik Trenggalek."
             )
 
         def _gen():
@@ -942,12 +1004,10 @@ class RAGPipeline:
                 CONFIG["memory_collection"]
             )
 
-            # ── Block 0: User identity ──────────────────────────────────
             identity: str = ""
             if user_id is not None:
                 identity = self.get_identity(user_id) or ""
 
-            # ── Block 1: Running summary ────────────────────────────────
             summary: str = ""
             try:
                 result = collection.get(
@@ -963,7 +1023,6 @@ class RAGPipeline:
             except Exception:
                 log.debug("[Memory] No summary yet for chat_id=%d", chat_id)
 
-            # ── Block 2: Recent window ──────────────────────────────────
             recent_text: str = ""
             try:
                 all_results = collection.get(include=["documents", "metadatas"])
@@ -1005,7 +1064,6 @@ class RAGPipeline:
                     exc_info=True,
                 )
 
-            # ── Merge three blocks ──────────────────────────────────────
             if not identity and not summary and not recent_text:
                 log.debug("[Memory] No memory for chat_id=%d", chat_id)
                 return None
@@ -1126,19 +1184,28 @@ class RAGPipeline:
             question_trunc = question.strip()[:_max_question_chars]
             prev_trunc     = previous_summary[:_max_summary_chars] if previous_summary else ""
 
+            # Ambil template memory_summary_block dari PromptRegistry
+            summary_template = _get_prompt("id", "memory_summary_block", required=False) or ""
+
             if prev_trunc:
-                summary_prompt = PROMPTS["memory_summary_update"].format(
-                    max_words=max_words,
-                    previous_summary=prev_trunc,
-                    question=question_trunc,
-                    answer=answer_trunc,
+                summary_prompt = (
+                    f"Perbarui ringkasan percakapan berikut dengan menambahkan percakapan baru. "
+                    f"Gunakan MAKSIMAL {max_words} kata.\n\n"
+                    f"{summary_template}\n\n"
+                    f"Ringkasan sebelumnya:\n{prev_trunc}\n\n"
+                    f"Percakapan baru:\nPengguna: {question_trunc}\nBatikBot: {answer_trunc}\n\n"
+                    f"Ringkasan baru:"
                 )
             else:
-                summary_prompt = PROMPTS["memory_summary_new"].format(
-                    max_words=max_words,
-                    question=question_trunc,
-                    answer=answer_trunc,
+                summary_prompt = (
+                    f"{summary_template}\n\n"
+                    f"Percakapan:\nPengguna: {question_trunc}\nBatikBot: {answer_trunc}\n\n"
+                    f"Ringkasan:"
                 )
+
+            # Format max_words placeholder kalau masih ada
+            if "{max_words}" in summary_prompt:
+                summary_prompt = summary_prompt.format(max_words=max_words)
 
             log.info(
                 "[Memory] Summarizing new summary — chat_id=%d  detail_id=%d  prev_summary=%d chars",
@@ -1198,7 +1265,7 @@ class RAGPipeline:
             # ══════════════════════════════════════════════════════════════
             recent_doc = (
                 f"User: {question.strip()}\n"
-                f"ragna: {answer.strip()}"
+                f"BatikBot: {answer.strip()}"
             )
             recent_embedding = self.models.get_embedding(recent_doc)
             collection.upsert(
@@ -1253,7 +1320,7 @@ class RAGPipeline:
 
             log.info("[InputGuard] Social query is clean (lang=%s)", lang)
 
-            # ── Fetch memory + user identity if available ───────────────
+            # ── Memory ───────────────────────────────────────────────────
             memory_text: str | None = None
             if chat_id is not None:
                 memory_text = self.get_memory(chat_id, query, user_id=user_id)
@@ -1262,22 +1329,22 @@ class RAGPipeline:
                 else:
                     log.debug("[Social] No memory yet for chat_id=%d", chat_id)
 
-            use_compact = tier in ("small", "medium")
+            # ── Build system prompt dari slot ────────────────────────────
+            # Ambil dari registry (atau fallback): bot_identity + social_guard_rail
+            bot_identity = _get_prompt(lang, "bot_identity", required=False) or ""
+            social_slot  = _get_prompt(lang, "social_guard_rail", required=True)
 
-            if lang == "id":
+            # Sisipkan memory_section manual (placeholder {memory_section})
+            memory_section = ""
+            if memory_text:
                 memory_section = (
-                    PROMPTS["social_memory_block_id"].format(memory=memory_text)
-                    if memory_text else ""
-                )
-                prompt_key = "social_system_id_local" if use_compact else "social_system_id"
-                system_msg = PROMPTS[prompt_key].format(memory_section=memory_section)
-            else:
-                memory_section = (
-                    PROMPTS["social_memory_block_en"].format(memory=memory_text)
-                    if memory_text else ""
-                )
-                prompt_key = "social_system_en_local" if use_compact else "social_system_en"
-                system_msg = PROMPTS[prompt_key].format(memory_section=memory_section)
+                    _get_prompt(lang, "memory_block_guard_rail", required=False) or ""
+                ).format(memory=memory_text)
+
+            system_msg = (
+                f"{bot_identity}\n\n"
+                f"{social_slot.format(memory_section=memory_section)}"
+            )
 
             messages = [
                 {"role": "system", "content": system_msg},
@@ -1285,10 +1352,9 @@ class RAGPipeline:
             ]
 
             log.info(
-                "[Social] tier=%s  model=%s  prompt=%s  lang=%s  memory=%s  user_id=%s  query=%r",
+                "[Social] tier=%s  model=%s  lang=%s  memory=%s  user_id=%s  query=%r",
                 tier,
                 CONFIG.get("groq_model", "?"),
-                prompt_key,
                 lang,
                 "yes" if memory_text else "no",
                 user_id or "-",
@@ -1327,11 +1393,9 @@ class RAGPipeline:
             log.info("═" * 60)
             log.info("[Knowledge] Query: %r  chat_id=%s", query[:120], chat_id)
 
-            # ── Language detection & NLP keyword enrichment ─────────────
             lang = self._detect_language(query)
             log.info("[Knowledge] Detected language: %s", lang)
 
-            # Defense-in-depth scan
             scan_result = self._scan_query(query, lang=lang)
             if scan_result["is_suspicious"]:
                 log.warning(
@@ -1352,9 +1416,7 @@ class RAGPipeline:
             enriched_query = f"{query} {nlp_keywords}".strip() if nlp_keywords else query
             log.debug("[Knowledge] Enriched query: %r", enriched_query[:200])
 
-            # ══════════════════════════════════════════════════════════════
-            # STAGE 1 — ChromaDB Wide Retrieval
-            # ══════════════════════════════════════════════════════════════
+            # ── STAGE 1 — ChromaDB ───────────────────────────────────────
             k = CONFIG["chroma_retrieval_k"]
             log.info("[Stage 1] ChromaDB retrieval (k=%d)...", k)
             t1_start = time.perf_counter()
@@ -1376,9 +1438,7 @@ class RAGPipeline:
                     intent="knowledge",
                 )
 
-            # ══════════════════════════════════════════════════════════════
-            # STAGE 2 — Neo4j Context Enrichment
-            # ══════════════════════════════════════════════════════════════
+            # ── STAGE 2 — Neo4j enrichment ───────────────────────────────
             log.info(
                 "[Stage 2] Neo4j enrichment (%d candidates, window=±%d)...",
                 len(candidates), CONFIG["context_window"],
@@ -1402,9 +1462,7 @@ class RAGPipeline:
                     intent="knowledge",
                 )
 
-            # ══════════════════════════════════════════════════════════════
-            # STAGE 3 — BGE Reranking
-            # ══════════════════════════════════════════════════════════════
+            # ── STAGE 3 — Rerank ─────────────────────────────────────────
             reranked_k = CONFIG["reranked_k"]
             log.info(
                 "[Stage 3] BGE reranking (%d → top %d) @ GPU...",
@@ -1413,7 +1471,18 @@ class RAGPipeline:
 
             t3_start = time.perf_counter()
 
-            scores = self.models.rerank(query, [c.context_text for c in enriched])
+            # Truncate context_text untuk rerank — hindari VRAM overflow.
+            # Context asli (untuk LLM) tetap utuh; hanya yang masuk reranker
+            # yang dipotong. BGE max 8192 token, tapi kita batasi lebih ketat
+            # supaya cross-encoder tidak OOM saat VRAM sedang penuh.
+            MAX_RERANK_CHARS = 2000
+            rerank_texts = [c.context_text[:MAX_RERANK_CHARS] for c in enriched]
+            log.debug(
+                "[Stage 3] Rerank input truncated → avg_len=%d chars",
+                sum(len(t) for t in rerank_texts) // max(len(rerank_texts), 1),
+            )
+
+            scores = self.models.rerank(query, rerank_texts)
 
             for i, score in enumerate(scores):
                 if i < len(enriched):
@@ -1430,9 +1499,7 @@ class RAGPipeline:
                 max(c.rerank_score for c in top_chunks),
             )
 
-            # ══════════════════════════════════════════════════════════════
-            # STAGE 4 — Filtering & Source Diversification
-            # ══════════════════════════════════════════════════════════════
+            # ── STAGE 4 — Diversifikasi ──────────────────────────────────
             max_per_j = CONFIG["max_chunks_per_jurnal"]
             final_k   = CONFIG["final_context_k"]
             log.info(
@@ -1456,9 +1523,7 @@ class RAGPipeline:
                 len(final_chunks), len(jurnal_count),
             )
 
-            # ══════════════════════════════════════════════════════════════
-            # STAGE 5 — Memory Inject
-            # ══════════════════════════════════════════════════════════════
+            # ── STAGE 5 — Memory ─────────────────────────────────────────
             memory_text: str | None = None
             if chat_id is not None:
                 log.info("[Stage 5] Fetching memory for chat_id=%d  user_id=%s...", chat_id, user_id)
@@ -1470,9 +1535,7 @@ class RAGPipeline:
             else:
                 log.debug("[Stage 5] chat_id=None — memory skipped.")
 
-            # ══════════════════════════════════════════════════════════════
-            # STAGE 6 — LLM Generation (Groq API, streaming)
-            # ══════════════════════════════════════════════════════════════
+            # ── STAGE 6 — LLM Generation ─────────────────────────────────
             messages   = self._build_messages(query, final_chunks, lang=lang, memory=memory_text)
             answer_gen = self._generate_stream(
                 messages,
@@ -1515,6 +1578,79 @@ class RAGPipeline:
                 intent="knowledge",
             )
 
+    # ── Product Pipeline ──────────────────────────────────────────────────
+
+    def process_product_query(
+        self,
+        query:      str,
+        chat_id:    int | None = None,
+        stop_event: threading.Event = None,
+        user_id:    int | None = None,
+    ) -> RAGResponse:
+        """Product recommendation pipeline (SQL query + LLM formatting)."""
+        with log_context("pipeline"):
+            t_start = time.perf_counter()
+            log.info("═" * 60)
+            log.info("[Product] Query: %r  chat_id=%s", query[:120], chat_id)
+
+            lang = self._detect_language(query)
+
+            scan_result = self._scan_query(query, lang=lang)
+            if scan_result["is_suspicious"]:
+                log.warning("[InputGuard] Product query rejected — slot=%s", scan_result["matched_slot"])
+                return RAGResponse(
+                    answer=self._refuse_injection_stream("umum"),
+                    sources=[], final_chunks=[],
+                    processing_time=0.0, intent="blocked",
+                )
+
+            # ── Stage 1: Extract filter ──────────────────────────────────
+            filters = self._extract_product_filters(query)
+            log.info("[Product Stage 1] Extracted filters: %s", filters)
+
+            # ── Stage 2: Query SQL ───────────────────────────────────────
+            k = CONFIG.get("product_recommendation_k", 5)
+            products = self.product_tool.search(
+                keyword   = filters.get("keyword"),
+                motif     = filters.get("motif"),
+                max_harga = filters.get("max_harga"),
+                limit     = k,
+            )
+            log.info("[Product Stage 2] %d produk ditemukan", len(products))
+
+            if not products:
+                return RAGResponse(
+                    answer=self._stream_text(
+                        "Maaf, belum ada produk yang cocok dengan permintaan Anda. "
+                        "Coba sebutkan motif atau budget lain ya."
+                    ),
+                    sources=[], final_chunks=[],
+                    processing_time=time.perf_counter() - t_start,
+                    intent="product",
+                )
+
+            # ── Stage 3: Build messages + LLM ────────────────────────────
+            messages   = self._build_product_messages(query, products, lang=lang)
+            answer_gen = self._generate_stream(
+                messages,
+                stop_event=stop_event,
+                temperature=0.5,
+                top_p=0.9,
+                max_new_tokens=1500,
+            )
+
+            elapsed = time.perf_counter() - t_start
+            log.info("[Product] Pipeline done — %.3fs  |  %d produk", elapsed, len(products))
+            log.info("═" * 60)
+
+            return RAGResponse(
+                answer=answer_gen,
+                sources=[{"tipe": "produk", **p} for p in products],
+                final_chunks=[],
+                processing_time=elapsed,
+                intent="product",
+            )
+
     def process_vision_query(
         self,
         query:        str,
@@ -1528,7 +1664,6 @@ class RAGPipeline:
             log.info("═" * 60)
             log.info("[Vision] Processing image with Gemini 3 Flash Preview...")
 
-            # Scan query text before the image
             if query and query.strip():
                 _vlang = self._detect_language(query)
                 _vscan = self._scan_query(query, lang=_vlang)
@@ -1558,7 +1693,7 @@ class RAGPipeline:
                 raise ValueError("Invalid or corrupted image data.")
 
             prompt = (
-                f"Sebagai pakar pertanian (ragna), tolong analisis gambar ini secara detail.\n\n"
+                f"Sebagai pakar budaya batik, tolong analisis gambar ini secara detail.\n\n"
                 f"Konteks/Pertanyaan pengguna: {query}"
             )
 
@@ -1615,14 +1750,11 @@ class RAGPipeline:
 
             log.info("[InputGuard] Regular query is clean (lang=%s)", _rlang)
 
-            # ── Language detection & NLP keyword enrichment ─────────────
             lang         = self._detect_language(query)
             nlp_keywords = self.models.extract_keywords_nlp(query, lang)
             enriched_query = f"{query} {nlp_keywords}".strip() if nlp_keywords else query
 
-            # ══════════════════════════════════════════════════════════════
-            # STAGE 1 — ChromaDB Retrieval (RAW COLLECTION)
-            # ══════════════════════════════════════════════════════════════
+            # ── STAGE 1 — ChromaDB (RAW collection) ──────────────────────
             k = CONFIG.get("regular_retrieval_k", 6)
             log.info("[RegularRAG Stage 1] ChromaDB retrieval (k=%d) from raw_collection...", k)
             t1 = time.perf_counter()
@@ -1660,9 +1792,7 @@ class RAGPipeline:
                     intent="knowledge",
                 )
 
-            # ══════════════════════════════════════════════════════════════
-            # STAGE 2 — Reranking (BGE Cross-Encoder)
-            # ══════════════════════════════════════════════════════════════
+            # ── STAGE 2 — Rerank ─────────────────────────────────────────
             reranked_k = CONFIG.get("regular_reranked_k", 3)
             log.info("[RegularRAG Stage 2] BGE reranking (%d → top %d)...", len(raw_chunks), reranked_k)
             t2 = time.perf_counter()
@@ -1679,16 +1809,12 @@ class RAGPipeline:
             raw_rerank_elapsed = time.perf_counter() - t2
             log.info("[RegularRAG Stage 2] Top %d selected (%.3fs)", len(top_chunks), raw_rerank_elapsed)
 
-            # ══════════════════════════════════════════════════════════════
-            # STAGE 3 — Memory Inject
-            # ══════════════════════════════════════════════════════════════
+            # ── STAGE 3 — Memory ─────────────────────────────────────────
             memory_text: str | None = None
             if chat_id is not None:
                 memory_text = self.get_memory(chat_id, query, user_id=user_id)
 
-            # ══════════════════════════════════════════════════════════════
-            # STAGE 4 — LLM Generation
-            # ══════════════════════════════════════════════════════════════
+            # ── STAGE 4 — LLM Generation ─────────────────────────────────
             messages   = self._build_regular_messages(query, top_chunks, lang=lang, memory=memory_text)
             answer_gen = self._generate_stream(
                 messages,
@@ -1727,10 +1853,44 @@ class RAGPipeline:
 
     @staticmethod
     def _detect_query_intent(text: str) -> str:
-        """Route intent: 'knowledge' → RAG pipeline, 'social' → social pipeline."""
+        """Route intent: 'social' | 'knowledge' | 'product'."""
         normalized = text.lower().strip()
         words      = set(normalized.split())
 
+        # ── PRIORITAS TERTINGGI: Product recommendation ───────────────
+        PRODUCT_PHRASES = {
+            "rekomendasi batik", "rekomendasikan batik", "batik bagus",
+            "batik murah", "batik premium", "cari batik", "carikan batik",
+            "beli batik", "order batik", "pesan batik",
+            "dimana beli batik", "di mana beli batik",
+            "penjual batik", "toko batik", "umkm batik",
+            "harga batik", "batik berapa",
+        }
+        for phrase in PRODUCT_PHRASES:
+            if phrase in normalized:
+                log.debug("[Intent] product — phrase: %r", phrase)
+                return "product"
+
+        PRODUCT_ACTIONS = {"rekomendasi", "rekomendasikan", "carikan", "beli", "order", "pesan", "cari"}
+        if (words & PRODUCT_ACTIONS) and ("batik" in normalized or "kain" in normalized):
+            log.debug("[Intent] product — action + batik")
+            return "product"
+
+        MOTIF_KEYWORDS = [
+            "turonggo yakso", "cengkehan", "gajah nungguk",
+            "pari srono", "manggis", "batu tumpuk", "kopi trenggalek",
+        ]
+        if any(m in normalized for m in MOTIF_KEYWORDS):
+            if any(w in normalized for w in ("harga", "beli", "order", "pesan", "dimana", "dimana beli")):
+                log.debug("[Intent] product — motif + action")
+                return "product"
+
+        # Batik + angka harga (4+ digit)
+        if "batik" in normalized and re.search(r"\b(?:rp|idr)?\s*\d{4,}", normalized):
+            log.debug("[Intent] product — batik + harga")
+            return "product"
+
+        # ── Social ─────────────────────────────────────────────────────
         SOCIAL_PHRASES = {
             "apa kabar", "apakabar", "terima kasih", "terimakasih",
             "sampai jumpa", "selamat tinggal", "thank you",
@@ -1741,7 +1901,7 @@ class RAGPipeline:
             "maaf", "sorry", "permisi",
             "dadah", "bye",
             "oke", "ok", "baik", "siap", "sip",
-            "namaku", "ingat", "siapa aku"
+            "namaku", "ingat", "siapa aku",
         }
         for phrase in SOCIAL_PHRASES:
             if phrase in normalized:
@@ -1755,6 +1915,7 @@ class RAGPipeline:
             log.debug("[Intent] knowledge — question mark")
             return "knowledge"
 
+        # ── Knowledge ──────────────────────────────────────────────────
         KNOWLEDGE_PHRASES = {
             "apa itu", "yang mana", "di mana",
             "coba ranking", "coba urutkan", "coba sebutkan", "coba jelaskan",
@@ -1777,19 +1938,16 @@ class RAGPipeline:
             "penyebab", "akibat", "dampak", "gejala", "tanda",
             "pengertian", "maksud", "artinya", "fungsi", "manfaat",
             "ciri", "karakteristik", "jenis", "macam", "klasifikasi",
-            "penanganan", "pengobatan", "pengendalian", "pencegahan",
             "ranking", "rangking", "urutan", "urutkan",
             "peringkat", "daftar", "susun", "susunkan",
             "terbanyak", "tersedikit", "terbesar", "terkecil",
             "tertinggi", "terendah", "terluas",
             "buatkan", "berikan", "tampilkan", "tunjukkan",
             "rekomendasikan", "rekomendasi",
-            "hama", "penyakit", "patogen", "serangan", "infeksi",
-            "tanaman", "tumbuhan", "pertanian", "agronomi", "pestisida",
-            "pupuk", "lahan", "sawah", "kebun", "panen", "benih", "bibit",
+            "batik", "motif", "kain", "canting", "pewarna",
+            "budaya", "sejarah", "filosofi", "makna", "tradisi",
             "what", "how", "why", "when", "where", "who", "which",
             "explain", "describe", "list", "define", "compare", "rank",
-            "causes", "symptoms", "treatment", "control", "prevention",
             "give", "show", "recommend", "provide",
         }
         for phrase in KNOWLEDGE_PHRASES:
@@ -1811,8 +1969,8 @@ class RAGPipeline:
             "explain", "describe", "tell", "list", "give", "show",
             "define", "compare", "is", "are", "does", "do", "can",
             "could", "the", "of", "in", "and", "or", "with", "for",
-            "about", "symptoms", "disease", "plant", "fungus",
-            "bacteria", "treatment", "control",
+            "about", "history", "batik", "motif", "culture", "tradition",
+            "price", "buy", "where",
         }
         words    = set(text.lower().split())
         en_score = len(words & en_markers)
@@ -1843,6 +2001,98 @@ class RAGPipeline:
 
         return "large"
 
+    # ── Product helpers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_product_filters(query: str) -> dict:
+        """Ekstrak filter dari query natural (MVP: regex sederhana)."""
+        q_lower = query.lower()
+        filters = {}
+
+        # ── Budget: "dibawah 100rb", "max 200000", "< 150000" ────────
+        m = re.search(
+            r"(?:dibawah|di bawah|max|maksimal|kurang dari|<)\s*(\d+)\s*(rb|ribu|k)?",
+            q_lower,
+        )
+        if m:
+            angka  = int(m.group(1))
+            satuan = m.group(2)
+            if satuan in ("rb", "ribu", "k"):
+                angka *= 1000
+            elif satuan is None and angka < 1000:
+                angka *= 1000
+            filters["max_harga"] = angka
+
+        # ── Motif ─────────────────────────────────────────────────────
+        MOTIF_KEYWORDS = {
+            "turonggo yakso":  "Turonggo Yakso",
+            "cengkehan":       "Cengkehan",
+            "gajah nungguk":   "Gajah Nungguk",
+            "pari srono":      "Pari Srono",
+            "manggis":         "Manggis",
+            "batu tumpuk":     "Batu Tumpuk",
+            "kopi trenggalek": "Kopi Trenggalek",
+        }
+        for key, val in MOTIF_KEYWORDS.items():
+            if key in q_lower:
+                filters["motif"] = val
+                break
+
+        # ── Nama toko (keyword) ───────────────────────────────────────
+        TOKO_KEYWORDS = [
+            "sekar jagad", "sekar biru", "mutiara menak sopal",
+            "widodo krajan", "oemah batik ngalum",
+        ]
+        for t in TOKO_KEYWORDS:
+            if t in q_lower:
+                filters["keyword"] = t
+                break
+
+        return filters
+
+    @staticmethod
+    def _format_products(products: List[Dict]) -> str:
+        """Format produk untuk konteks LLM."""
+        lines = []
+        for i, p in enumerate(products, 1):
+            harga = (
+                f"Rp{p['harga_per_meter']:,}".replace(",", ".")
+                if p.get("harga_per_meter") else "-"
+            )
+            lines.append(
+                f"[{i}] id_umkm={p['id_umkm']} | motif={p['nama_motif']} | "
+                f"toko={p['nama_umkm']} | harga={harga}/meter | WA={p['kontak_wa']} | "
+                f"alamat={p['alamat']}"
+            )
+        return "\n".join(lines)
+
+    def _build_product_messages(
+        self,
+        query:    str,
+        products: List[Dict],
+        lang:     str = "id",
+    ) -> List[Dict]:
+        """Build messages untuk product recommendation."""
+        product_context = self._format_products(products)
+        product_slot = _get_prompt(lang, "product_guard_rail", required=True)
+
+        system_content = product_slot.format(product_context=product_context)
+
+        question_label = "Pertanyaan" if lang == "id" else "Question"
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user",   "content": f"{question_label}: {query}"},
+        ]
+
+    @staticmethod
+    def _stream_text(text: str):
+        """Helper: ubah string jadi generator 1-chunk."""
+        def _gen():
+            yield text
+        return _gen()
+
+    # ── Message builders ──────────────────────────────────────────────────
+
     def _build_messages(
         self,
         query:  str,
@@ -1850,6 +2100,7 @@ class RAGPipeline:
         lang:   str = None,
         memory: str | None = None,
     ) -> List[Dict]:
+        """Build messages untuk knowledge pipeline (improved)."""
         tier        = self._get_model_tier()
         safe_budget = GROQ_MODEL_SAFE_TOKEN_BUDGET.get(CONFIG["groq_model"], 4_800)
         _usable     = safe_budget - FIXED_OVERHEAD_TOKENS
@@ -1890,50 +2141,33 @@ class RAGPipeline:
 
         lang = lang if lang is not None else self._detect_language(query)
 
-        if lang == "id":
+        # ── Ambil slot dari registry / fallback ──────────────────────
+        bot_identity   = _get_prompt(lang, "bot_identity", required=False) or ""
+        knowledge_slot = _get_prompt(lang, "knowledge_guard_rail", required=True)
+
+        # ── Sisipkan memory_section manual ───────────────────────────
+        memory_section = ""
+        if memory:
             _max_memory_chars = 1_200
-            if memory and len(memory) > _max_memory_chars:
+            if len(memory) > _max_memory_chars:
                 memory = memory[:_max_memory_chars] + "…"
                 log.debug("[BuildMessages] Memory truncated to %d chars", _max_memory_chars)
-            memory_section = (
-                PROMPTS["knowledge_memory_block_id"].format(memory=memory)
-                if memory else ""
-            )
-            prompt_key = {
-                "small":  "knowledge_system_id_local",
-                "medium": "knowledge_system_id_local",
-                "large":  "knowledge_system_id",
-            }[tier]
-            system_content = PROMPTS[prompt_key].format(
-                memory_section=memory_section,
-                context_str=context_str,
-                source_str=source_str,
-            )
-            question_label = "Pertanyaan"
-        else:
-            memory_section = (
-                PROMPTS["knowledge_memory_block_en"].format(memory=memory)
-                if memory else ""
-            )
-            prompt_key = {
-                "small":  "knowledge_system_en_local",
-                "medium": "knowledge_system_en_local",
-                "large":  "knowledge_system_en",
-            }[tier]
-            system_content = PROMPTS[prompt_key].format(
-                memory_section=memory_section,
-                context_str=context_str,
-                source_str=source_str,
-            )
-            question_label = "Question"
+            memory_template = _get_prompt(lang, "memory_block_guard_rail", required=False) or ""
+            memory_section = memory_template.format(memory=memory)
+
+        # ── Format knowledge_guard_rail ──────────────────────────────
+        # Prompt kita punya placeholder: {memory_section}, {context_str}, {source_str}
+        system_content = (
+            f"{bot_identity}\n\n"
+            f"{knowledge_slot.format(memory_section=memory_section, context_str=context_str, source_str=source_str)}"
+        )
+
+        question_label = "Pertanyaan" if lang == "id" else "Question"
 
         log.debug(
-            "[BuildMessages] tier=%s  model=%s  prompt=%s  lang=%s  context=%d chars  memory=%s",
-            tier,
-            CONFIG.get("groq_model", "?"),
-            prompt_key,
-            lang,
-            len(context_str),
+            "[BuildMessages] tier=%s  model=%s  lang=%s  context=%d chars  memory=%s",
+            tier, CONFIG.get("groq_model", "?"),
+            lang, len(context_str),
             "yes" if memory else "no",
         )
 
@@ -1949,7 +2183,7 @@ class RAGPipeline:
         lang:   str = None,
         memory: str | None = None,
     ) -> List[Dict]:
-        """Build messages for Regular RAG (without complex journal metadata)."""
+        """Build messages untuk Regular RAG (tanpa metadata jurnal kompleks)."""
         lang = lang if lang is not None else self._detect_language(query)
         tier = self._get_model_tier()
 
@@ -1978,43 +2212,30 @@ class RAGPipeline:
         context_str = "\n\n".join(context_parts)
         source_str  = "\n".join([f"[{i}] Chunk {i}" for i in range(1, len(chunks) + 1)])
 
-        if lang == "id":
-            memory_section = (
-                PROMPTS["knowledge_memory_block_id"].format(memory=memory)
-                if memory else ""
-            )
-            prompt_key = {
-                "small":  "knowledge_system_id_local",
-                "medium": "knowledge_system_id_local",
-                "large":  "knowledge_system_id",
-            }[tier]
-            system_content = PROMPTS[prompt_key].format(
-                memory_section=memory_section,
-                context_str=context_str,
-                source_str=source_str,
-            )
-            question_label = "Pertanyaan"
-        else:
-            memory_section = (
-                PROMPTS["knowledge_memory_block_en"].format(memory=memory)
-                if memory else ""
-            )
-            prompt_key = {
-                "small":  "knowledge_system_en_local",
-                "medium": "knowledge_system_en_local",
-                "large":  "knowledge_system_en",
-            }[tier]
-            system_content = PROMPTS[prompt_key].format(
-                memory_section=memory_section,
-                context_str=context_str,
-                source_str=source_str,
-            )
-            question_label = "Question"
+        bot_identity   = _get_prompt(lang, "bot_identity", required=False) or ""
+        knowledge_slot = _get_prompt(lang, "knowledge_guard_rail", required=True)
+
+        memory_section = ""
+        if memory:
+            _max_memory_chars = 1_200
+            if len(memory) > _max_memory_chars:
+                memory = memory[:_max_memory_chars] + "…"
+            memory_template = _get_prompt(lang, "memory_block_guard_rail", required=False) or ""
+            memory_section = memory_template.format(memory=memory)
+
+        system_content = (
+            f"{bot_identity}\n\n"
+            f"{knowledge_slot.format(memory_section=memory_section, context_str=context_str, source_str=source_str)}"
+        )
+
+        question_label = "Pertanyaan" if lang == "id" else "Question"
 
         return [
             {"role": "system", "content": system_content},
             {"role": "user",   "content": f"{question_label}: {query}"},
         ]
+
+    # ── LLM streaming ─────────────────────────────────────────────────────
 
     def _generate_stream(
         self,
@@ -2024,7 +2245,6 @@ class RAGPipeline:
         top_p:          float = None,
         max_new_tokens: int   = None,
     ) -> Generator[str, None, None]:
-        """Generate answer — routing based on CONFIG['llm_mode']."""
         _temperature    = temperature    if temperature    is not None else CONFIG["temperature"]
         _top_p          = top_p          if top_p          is not None else CONFIG["top_p"]
         _max_new_tokens = max_new_tokens if max_new_tokens is not None else CONFIG["max_new_tokens"]
@@ -2048,7 +2268,6 @@ class RAGPipeline:
         top_p:          float,
         max_new_tokens: int,
     ) -> Generator[str, None, None]:
-        """Generate via Groq API with SSE streaming."""
         log.info(
             "[Groq] Generate — model=%s  max_tokens=%d  temperature=%.2f  top_p=%.2f",
             CONFIG["groq_model"], max_new_tokens, temperature, top_p,
@@ -2100,7 +2319,6 @@ class RAGPipeline:
         top_p:          float,
         max_new_tokens: int,
     ) -> Generator[str, None, None]:
-        """Generate via HuggingFace AutoModelForCausalLM (folder cloned from HF Hub)."""
         model_name = os.path.basename(CONFIG.get("local_llm_path", "local"))
         log.info(
             "[LocalLLM] Generate — model=%s  max_tokens=%d  temperature=%.2f  top_p=%.2f",
@@ -2194,12 +2412,7 @@ class RAGPipeline:
         ]
 
     def _analyze_image(self, base64_image: str) -> Tuple[bool, str]:
-        """
-        Step 1: Extract information from the image into descriptive text.
-
-        P3: returns (success, message) tuple instead of a raw string,
-            so the caller doesn't need fragile startswith() checks.
-        """
+        """Extract information from the image into descriptive text."""
         gemini_api_key = os.environ.get("GEMINI_API_KEY")
         if not gemini_api_key:
             return (False, "GEMINI_API_KEY not found in environment.")
@@ -2215,9 +2428,9 @@ class RAGPipeline:
             return (False, "Uploaded image is corrupted or unreadable.")
 
         prompt = (
-            "Sebagai pakar pertanian, tolong identifikasi dan jelaskan "
-            "apa yang terlihat pada gambar tanaman ini secara detail, "
-            "khususnya jika terdapat gejala penyakit, hama, atau kondisi abnormal."
+            "Sebagai pakar budaya batik, tolong identifikasi dan jelaskan "
+            "apa yang terlihat pada gambar ini secara detail, khususnya "
+            "terkait motif, corak, atau elemen visual batik."
         )
 
         try:

@@ -1,20 +1,4 @@
-# embedder.py
-"""
-Embedder — PDF ingestion pipeline for the RAG knowledge base.
-
-Operating modes:
-  1. IMPORTED — called by main.py when user uploads a PDF
-     → Logging: inherits main.py's configuration (no extra setup)
-     → Context tag: "ingest" → routes to the INGEST panel
-
-  2. STANDALONE — run as `python embedder.py` from CMD
-     → Logging: sets up its own (INFO level, silences noisy libs)
-     → Context tag: "ingest" → still writes to plain stdout
-
-All ingest-phase logs automatically route to the INGEST panel
-thanks to the `log_context("ingest")` context manager.
-"""
-
+import codecs
 import hashlib
 import logging
 import os
@@ -480,6 +464,150 @@ def _build_line_dict(words: List[Dict], page_num: int, y_pos: float, page_height
 
 
 # =============================================================================
+# STEP 1b — TXT INGESTION
+# =============================================================================
+#
+# Plain text has no font / position metadata, so we synthesize the same
+# line-dict structure that parse_pdf_to_lines() produces. Headings are found
+# with text patterns and flagged with "heading_hint": True, which
+# score_subheading() honours, so build_isi_nodes() works unchanged for
+# both file types.
+#
+# Recognised headings:
+#   - Markdown          : "# Title", "## Title"
+#   - Numbered          : "1. Pendahuluan", "2.1 Metode", "II. Hasil"
+#   - ALL CAPS          : "ABSTRAK", "DAFTAR PUSTAKA"
+#   - Short + colon     : "Gejala klinis:"
+#   - Underlined        : "Title" followed by "=====" or "-----"
+# A form feed character (\f) is treated as a page break.
+# =============================================================================
+
+_TXT_FONT_SIZE         = 10.0
+_TXT_LINE_STEP         = 12.0   # synthetic y-distance between consecutive lines
+_TXT_HEADING_MAX_LEN   = 60     # pattern-based headings must be short
+
+_TXT_SEPARATOR_RE   = re.compile(r"^[=\-_*~#]{3,}$")
+_TXT_UNDERLINE_RE   = re.compile(r"^(?:={3,}|-{3,})$")
+_TXT_MD_HEADING_RE  = re.compile(r"^#{1,6}\s+(.+?)\s*#*$")
+_TXT_NUMBERED_RE    = re.compile(
+    r"^(?:\d+(?:\.\d+)+[.)]?|\d+[.)]|[IVXLC]+[.)])\s+[A-ZÀ-Ý]"
+)
+
+
+def _read_text_file(txt_path: str) -> str:
+    """Read a text file, tolerating common Windows encodings."""
+    raw = Path(txt_path).read_bytes()
+
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return raw.decode("utf-16").lstrip("\ufeff")
+
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):   # latin-1 never fails
+        try:
+            text = raw.decode(enc)
+            if enc != "utf-8-sig":
+                logger.warning("[TXT] %s is not valid UTF-8 — decoded as %s",
+                               os.path.basename(txt_path), enc)
+            return text
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1", errors="replace")  # unreachable, defensive
+
+
+def _looks_like_txt_heading(text: str) -> bool:
+    """Pattern-based heading guess for a single plain-text line."""
+    if len(text) > _TXT_HEADING_MAX_LEN:
+        return False
+    if _TXT_NUMBERED_RE.match(text) and not text.endswith((".", ";", ",")):
+        return True
+    if len(text) >= 4 and is_all_caps(text) and not text.endswith("."):
+        return True
+    if text.endswith(":") and len(text.split()) <= 8:
+        return True
+    return False
+
+
+def parse_txt_to_lines(txt_path: str) -> List[Dict]:
+    """
+    Parse a .txt file into the same line-dict format as parse_pdf_to_lines().
+    Blank lines become a larger y-gap, so paragraph breaks still contribute
+    to the heading score.
+    """
+    text = _read_text_file(txt_path)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    all_lines: List[Dict] = []
+
+    for page_num, page_text in enumerate(text.split("\f"), start=1):
+        page_lines = page_text.split("\n")
+        total = len(page_lines)
+        y = 0.0
+
+        for i, raw_line in enumerate(page_lines):
+            stripped = raw_line.strip()
+
+            if not stripped:
+                y += _TXT_LINE_STEP          # blank line → paragraph gap
+                continue
+            if _TXT_SEPARATOR_RE.match(stripped):
+                continue                     # "-----", "=====", "#####"
+
+            is_heading = False
+            md = _TXT_MD_HEADING_RE.match(stripped)
+            if md:
+                stripped, is_heading = md.group(1).strip(), True
+            else:
+                nxt = page_lines[i + 1].strip() if i + 1 < total else ""
+                if (
+                    _TXT_UNDERLINE_RE.match(nxt)
+                    and len(stripped) <= _TXT_HEADING_MAX_LEN
+                    and not stripped.endswith(".")
+                ):
+                    is_heading = True
+                else:
+                    is_heading = _looks_like_txt_heading(stripped)
+
+            y += _TXT_LINE_STEP
+            all_lines.append({
+                "text":        stripped,
+                "page":        page_num,
+                "font_size":   _TXT_FONT_SIZE,
+                "is_bold":     False,
+                "heading_hint": is_heading,
+                "y_position":  y,
+                "page_height": 0.0,          # 0 disables the footer penalty
+            })
+
+    return all_lines
+
+
+# =============================================================================
+# FILE-TYPE DISPATCH
+# =============================================================================
+
+_PARSERS = {
+    ".pdf": parse_pdf_to_lines,
+    ".txt": parse_txt_to_lines,
+}
+SUPPORTED_EXTENSIONS = tuple(_PARSERS)
+
+
+def is_supported_file(file_path: str) -> bool:
+    return Path(file_path).suffix.lower() in _PARSERS
+
+
+def parse_document_to_lines(file_path: str) -> List[Dict]:
+    """Pick the right parser based on the file extension."""
+    ext    = Path(file_path).suffix.lower()
+    parser = _PARSERS.get(ext)
+    if parser is None:
+        raise ValueError(
+            f"Unsupported file type '{ext}' for {os.path.basename(file_path)} "
+            f"(supported: {', '.join(SUPPORTED_EXTENSIONS)})"
+        )
+    return parser(file_path)
+
+
+# =============================================================================
 # STEP 2 — REMOVE BOILERPLATE
 # =============================================================================
 
@@ -579,6 +707,11 @@ def score_subheading(
     page_height = line.get("page_height", 0)
     if page_height > 0 and line["y_position"] > (page_height * 0.9):
         score -= 1
+
+    # TXT files carry no font/bold metadata — parse_txt_to_lines() sets an
+    # explicit hint instead, which guarantees the line passes the threshold.
+    if line.get("heading_hint"):
+        return max(score, SUBHEADING_SCORE_THRESHOLD)
 
     return score
 
@@ -908,9 +1041,9 @@ def run_pipeline(
             return None
 
         # ── Step 2: Parse PDF ───────────────────────────────────────
-        step_start("ingest", "parse", "Parse PDF")
+        step_start("ingest", "parse", f"Parse {Path(pdf_path).suffix.lstrip('.').upper() or 'file'}")
         _t = time.perf_counter()
-        lines = parse_pdf_to_lines(pdf_path)
+        lines = parse_document_to_lines(pdf_path)   # PDF or TXT (by extension)
         lines = clean_lines(lines)
         step_done("ingest", "parse", time.perf_counter() - _t)
 
@@ -1129,9 +1262,9 @@ def run_pipeline_raw(
             return None
 
         # ── Step 2: Parse PDF ───────────────────────────────────────
-        step_start("ingest", "parse", "Parse PDF")
+        step_start("ingest", "parse", f"Parse {Path(pdf_path).suffix.lstrip('.').upper() or 'file'}")
         _t = time.perf_counter()
-        lines = parse_pdf_to_lines(pdf_path)
+        lines = parse_document_to_lines(pdf_path)   # PDF or TXT (by extension)
         lines = clean_lines(lines)
         step_done("ingest", "parse", time.perf_counter() - _t)
 
@@ -1329,13 +1462,13 @@ def main():
     global MAX_TOKENS_PER_CHUNK
     import argparse
 
-    parser = argparse.ArgumentParser(description="Disease Journal PDF Embedder")
+    parser = argparse.ArgumentParser(description="Disease Journal Embedder (PDF / TXT)")
     parser.add_argument("--dataset",         default=DATASET_PATH)
     parser.add_argument("--chroma",          default=CHROMA_PATH)
     parser.add_argument("--neo4j-uri",       default=NEO4J_URI)
     parser.add_argument("--neo4j-user",      default=NEO4J_USER)
     parser.add_argument("--neo4j-password",  default=NEO4J_PASSWORD)
-    parser.add_argument("--file",            help="Process a single PDF")
+    parser.add_argument("--file",            help="Process a single file (.pdf or .txt)")
     parser.add_argument("--max-tokens",      type=int, default=MAX_TOKENS_PER_CHUNK)
     args = parser.parse_args()
 
@@ -1364,40 +1497,50 @@ def main():
     chroma = ChromaIngestor(persist_directory=args.chroma)
 
     if args.file:
-        pdf_files = [Path(args.file)]
+        doc_files = [Path(args.file)]
+        if not is_supported_file(args.file):
+            logger.error(
+                "Unsupported file type: %s (supported: %s)",
+                args.file, ", ".join(SUPPORTED_EXTENSIONS),
+            )
+            neo4j.close()
+            return
     else:
         dataset_path = Path(args.dataset)
         if not dataset_path.exists():
             logger.error("Dataset path not found: %s", dataset_path)
             neo4j.close()
             return
-        pdf_files = list(dataset_path.glob("**/*.pdf"))
+        doc_files = sorted(
+            p for p in dataset_path.rglob("*")
+            if p.is_file() and is_supported_file(str(p))
+        )
 
-    if not pdf_files:
-        logger.warning("No PDF files found!")
+    if not doc_files:
+        logger.warning("No supported files (%s) found!", ", ".join(SUPPORTED_EXTENSIONS))
         neo4j.close()
         return
 
-    logger.info("Found %d PDF file(s) to process", len(pdf_files))
+    logger.info("Found %d file(s) to process", len(doc_files))
 
     all_results   = []
     skipped_files = 0
 
-    for pdf_file in pdf_files:
+    for doc_file in doc_files:
         try:
             jurnal_metadata = {
-                "judul":         pdf_file.stem,
+                "judul":         doc_file.stem,
                 "doi":           None,
                 "penulis":       "Unknown Author",
                 "tanggal_rilis": "2024",
             }
-            result = run_pipeline(str(pdf_file), jurnal_metadata, rag_models, neo4j, chroma)
+            result = run_pipeline(str(doc_file), jurnal_metadata, rag_models, neo4j, chroma)
             if result:
                 all_results.append(result)
             else:
                 skipped_files += 1
         except Exception as e:
-            logger.exception("Error processing %s", pdf_file)
+            logger.exception("Error processing %s", doc_file)
 
     neo4j.close()
 
