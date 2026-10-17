@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:frontend/chats/service_chats.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:frontend/chats/batik_theme.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 
@@ -28,12 +29,15 @@ class AiAvatar extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     width: 30,
     height: 30,
-    decoration: BoxDecoration(
+    decoration: const BoxDecoration(
       shape: BoxShape.circle,
-      color: const Color(0x3316DB65),
-      border: Border.all(color: const Color(0xFF16DB65).withValues(alpha: 0.4)),
+      color: BatikColors.marun,
     ),
-    child: const Icon(Icons.eco_rounded, color: Color(0xFF16DB65), size: 15),
+    child: const Icon(
+      Icons.support_agent_rounded,
+      color: Colors.white,
+      size: 17,
+    ),
   );
 }
 
@@ -52,14 +56,20 @@ class UserBubble extends StatelessWidget {
         ),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: const Color(0x3316DB65),
+          color: BatikColors.marun,
           borderRadius: const BorderRadius.only(
             topLeft: Radius.circular(16),
             topRight: Radius.circular(16),
             bottomLeft: Radius.circular(16),
             bottomRight: Radius.circular(4),
           ),
-          border: Border.all(color: const Color(0xFF16DB65).withValues(alpha: 0.25)),
+          boxShadow: [
+            BoxShadow(
+              color: BatikColors.marun.withValues(alpha: 0.18),
+              blurRadius: 8,
+              offset: const Offset(0, 3),
+            ),
+          ],
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
@@ -79,13 +89,18 @@ class UserBubble extends StatelessWidget {
                   ),
                 ),
               ),
-            SelectionArea(
-              child: Text(
-                text,
-                style: GoogleFonts.poppins(
-                  fontSize: 14,
-                  color: Colors.white,
-                  height: 1.6,
+            // Warna seleksi putih agar teks yang di-blok tetap terlihat di atas marun.
+            DefaultSelectionStyle(
+              selectionColor: Colors.white.withValues(alpha: 0.35),
+              cursorColor: Colors.white,
+              child: SelectionArea(
+                child: Text(
+                  text,
+                  style: GoogleFonts.nunitoSans(
+                    fontSize: 14.5,
+                    color: Colors.white,
+                    height: 1.55,
+                  ),
                 ),
               ),
             ),
@@ -111,41 +126,68 @@ class AiBubble extends StatelessWidget {
       children: [
         if (isError)
           Container(
-            width: 30, height: 30,
-            decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0x33FF4444), border: Border.all(color: const Color(0xFFFF4444).withValues(alpha: 0.4))),
-            child: const Icon(Icons.error_outline_rounded, color: Color(0xFFFF4444), size: 15),
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: const Color(0xFFFFE4E1),
+              border: Border.all(color: BatikColors.marun.withValues(alpha: 0.4)),
+            ),
+            child: const Icon(
+              Icons.error_outline_rounded,
+              color: BatikColors.marun,
+              size: 16,
+            ),
           )
         else
           const AiAvatar(),
         const SizedBox(width: 10),
         Expanded(
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            decoration: BoxDecoration(
-              color: isError ? const Color(0xFF1A0A0A) : const Color(0xFF111111),
-              borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(4),
-                topRight: Radius.circular(16),
-                bottomLeft: Radius.circular(16),
-                bottomRight: Radius.circular(16),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            // Batasi lebar baris agar nyaman dibaca di layar lebar.
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 760),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  color: isError ? const Color(0xFFFFF1EF) : BatikColors.putih,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(4),
+                    topRight: Radius.circular(16),
+                    bottomLeft: Radius.circular(16),
+                    bottomRight: Radius.circular(16),
+                  ),
+                  border: Border.all(
+                    color: isError
+                        ? BatikColors.marun.withValues(alpha: 0.35)
+                        : BatikColors.garis,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: BatikColors.sogaGelap.withValues(alpha: 0.05),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: DefaultSelectionStyle(
+                  selectionColor: BatikColors.marun.withValues(alpha: 0.2),
+                  cursorColor: BatikColors.marun,
+                  child: SelectionArea(
+                    child: isError
+                        ? Text(
+                            displayText,
+                            style: GoogleFonts.nunitoSans(
+                              fontSize: 14.5,
+                              color: BatikColors.marunGelap,
+                              height: 1.6,
+                            ),
+                          )
+                        : _RichAiContent(data: displayText),
+                  ),
+                ),
               ),
-              border: Border.all(
-                color: isError
-                    ? const Color(0xFFFF4444).withValues(alpha: 0.3)
-                    : const Color(0xFF1A1A1A),
-              ),
-            ),
-            child: SelectionArea(
-              child: isError
-                  ? Text(
-                      displayText,
-                      style: GoogleFonts.poppins(
-                        fontSize: 14,
-                        color: const Color(0xFFFF8888),
-                        height: 1.6,
-                      ),
-                    )
-                  : _RichAiContent(data: displayText),
             ),
           ),
         ),
@@ -184,7 +226,7 @@ class _RichAiContent extends StatelessWidget {
         onTapLink: (text, href, title) {
           if (href != null) launchUrl(Uri.parse(href));
         },
-        styleSheet: _markdownStyleSheet(),
+        styleSheet: _markdownStyleSheet(context),
       );
     }
 
@@ -206,7 +248,7 @@ class _RichAiContent extends StatelessWidget {
             onTapLink: (text, href, title) {
               if (href != null) launchUrl(Uri.parse(href));
             },
-            styleSheet: _markdownStyleSheet(),
+            styleSheet: _markdownStyleSheet(context),
           ));
         }
       }
@@ -230,7 +272,7 @@ class _RichAiContent extends StatelessWidget {
           data: m.group(0)!,
           selectable: false,
           extensionSet: md.ExtensionSet.gitHubWeb,
-          styleSheet: _markdownStyleSheet(),
+          styleSheet: _markdownStyleSheet(context),
         ));
       }
 
@@ -250,7 +292,7 @@ class _RichAiContent extends StatelessWidget {
           onTapLink: (text, href, title) {
             if (href != null) launchUrl(Uri.parse(href));
           },
-          styleSheet: _markdownStyleSheet(),
+          styleSheet: _markdownStyleSheet(context),
         ));
       }
     }
@@ -315,11 +357,9 @@ class _ProductCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFF0F1A0F),
+        color: BatikColors.kertas,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: const Color(0xFF16DB65).withValues(alpha: 0.3),
-        ),
+        border: Border.all(color: BatikColors.garis),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -327,10 +367,10 @@ class _ProductCard extends StatelessWidget {
           // Motif
           Text(
             motif,
-            style: GoogleFonts.poppins(
-              color: Colors.white,
-              fontWeight: FontWeight.w600,
-              fontSize: 14,
+            style: GoogleFonts.playfairDisplay(
+              color: BatikColors.sogaGelap,
+              fontWeight: FontWeight.w700,
+              fontSize: 15,
             ),
           ),
           const SizedBox(height: 4),
@@ -338,9 +378,9 @@ class _ProductCard extends StatelessWidget {
           // Toko
           Text(
             toko,
-            style: GoogleFonts.poppins(
-              color: const Color(0xFFA3A3A3),
-              fontSize: 12,
+            style: GoogleFonts.nunitoSans(
+              color: BatikColors.abuTeks,
+              fontSize: 12.5,
             ),
           ),
           const SizedBox(height: 8),
@@ -350,16 +390,16 @@ class _ProductCard extends StatelessWidget {
             children: [
               const Icon(
                 Icons.local_offer_rounded,
-                size: 13,
-                color: Color(0xFF16DB65),
+                size: 14,
+                color: BatikColors.emas,
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 5),
               Text(
                 "$_hargaFormatted / meter",
-                style: GoogleFonts.poppins(
-                  color: const Color(0xFF16DB65),
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+                style: GoogleFonts.nunitoSans(
+                  color: BatikColors.marun,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
                 ),
               ),
             ],
@@ -374,14 +414,14 @@ class _ProductCard extends StatelessWidget {
               icon: const Icon(Icons.chat_rounded, size: 16),
               label: Text(
                 "Hubungi via WhatsApp",
-                style: GoogleFonts.poppins(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+                style: GoogleFonts.nunitoSans(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
                 ),
               ),
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF16DB65),
-                foregroundColor: Colors.black,
+                backgroundColor: BatikColors.hijau,
+                foregroundColor: Colors.white,
                 elevation: 0,
                 padding: const EdgeInsets.symmetric(vertical: 10),
                 shape: RoundedRectangleBorder(
@@ -413,83 +453,81 @@ class _BreakSyntax extends md.InlineSyntax {
   }
 }
 
-MarkdownStyleSheet _markdownStyleSheet() {
-  return MarkdownStyleSheet(
-    p: GoogleFonts.poppins(fontSize: 14, color: Colors.white, height: 1.7),
-    strong: GoogleFonts.poppins(
-      fontSize: 14,
-      color: Colors.white,
-      fontWeight: FontWeight.w600,
+/// Stylesheet markdown untuk balasan backend.
+/// Semua teks memakai warna gelap (sogaGelap) karena bubble AI berlatar putih.
+/// Dibangun dari tema agar elemen yang tidak didefinisikan (h4, del, dll.)
+/// tidak jatuh ke warna bawaan yang tidak terduga.
+MarkdownStyleSheet _markdownStyleSheet(BuildContext context) {
+  final base = GoogleFonts.nunitoSans(
+    fontSize: 14.5,
+    color: BatikColors.sogaGelap,
+    height: 1.65,
+  );
+  final heading = GoogleFonts.playfairDisplay(
+    color: BatikColors.sogaGelap,
+    fontWeight: FontWeight.w700,
+    height: 1.35,
+  );
+
+  return MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+    p: base,
+    strong: base.copyWith(fontWeight: FontWeight.w800),
+    em: base.copyWith(fontStyle: FontStyle.italic),
+    del: base.copyWith(
+      decoration: TextDecoration.lineThrough,
+      color: BatikColors.abuTeks,
     ),
-    em: GoogleFonts.poppins(
-      fontSize: 14,
-      color: Colors.white,
-      fontStyle: FontStyle.italic,
-    ),
-    h1: GoogleFonts.poppins(
-      fontSize: 20,
-      color: Colors.white,
-      fontWeight: FontWeight.w700,
-      height: 1.4,
-    ),
-    h2: GoogleFonts.poppins(
-      fontSize: 17,
-      color: Colors.white,
-      fontWeight: FontWeight.w600,
-      height: 1.4,
-    ),
-    h3: GoogleFonts.poppins(
-      fontSize: 15,
-      color: Colors.white,
-      fontWeight: FontWeight.w600,
-      height: 1.4,
-    ),
+    h1: heading.copyWith(fontSize: 21),
+    h2: heading.copyWith(fontSize: 18),
+    h3: heading.copyWith(fontSize: 16),
+    h4: base.copyWith(fontWeight: FontWeight.w700),
     code: GoogleFonts.sourceCodePro(
       fontSize: 13,
-      color: const Color(0xFF16DB65),
-      backgroundColor: const Color(0xFF1A2A1A),
+      color: BatikColors.marunGelap,
+      backgroundColor: BatikColors.krem,
     ),
     codeblockDecoration: BoxDecoration(
-      color: const Color(0xFF0A1A0A),
+      color: BatikColors.krem,
       borderRadius: BorderRadius.circular(8),
-      border: Border.all(color: const Color(0xFF16DB65).withValues(alpha: 0.2)),
+      border: Border.all(color: BatikColors.garis),
     ),
     codeblockPadding: const EdgeInsets.all(14),
-    listBullet: GoogleFonts.poppins(
-      fontSize: 14,
-      color: const Color(0xFF16DB65),
+    listBullet: base.copyWith(
+      color: BatikColors.marun,
+      fontWeight: FontWeight.w700,
     ),
     listIndent: 20,
-    blockquote: GoogleFonts.poppins(
-      fontSize: 14,
-      color: const Color(0xFFCCCCCC),
+    blockquote: base.copyWith(
+      color: BatikColors.soga,
       fontStyle: FontStyle.italic,
-      height: 1.6,
     ),
     blockquoteDecoration: BoxDecoration(
-      border: Border(
-        left: BorderSide(
-          color: const Color(0xFF16DB65).withValues(alpha: 0.5),
-          width: 3,
-        ),
+      color: BatikColors.krem,
+      borderRadius: BorderRadius.circular(6),
+      border: const Border(
+        left: BorderSide(color: BatikColors.emas, width: 3),
       ),
     ),
-    blockquotePadding: const EdgeInsets.only(left: 12),
-    tableHead: GoogleFonts.poppins(
-      fontSize: 13,
-      color: Colors.white,
+    blockquotePadding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+    tableHead: base.copyWith(
+      fontSize: 13.5,
+      fontWeight: FontWeight.w700,
+      color: BatikColors.marunGelap,
+    ),
+    tableBody: base.copyWith(fontSize: 13.5, height: 1.5),
+    tableBorder: TableBorder.all(
+      color: BatikColors.garis,
+      borderRadius: BorderRadius.circular(6),
+    ),
+    tableCellsPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+    horizontalRuleDecoration: const BoxDecoration(
+      border: Border(top: BorderSide(color: BatikColors.garis)),
+    ),
+    a: base.copyWith(
+      color: BatikColors.marun,
       fontWeight: FontWeight.w600,
-    ),
-    tableBody: GoogleFonts.poppins(
-      fontSize: 13,
-      color: Colors.white,
-      height: 1.5,
-    ),
-    a: GoogleFonts.poppins(
-      fontSize: 14,
-      color: const Color(0xFF16DB65),
       decoration: TextDecoration.underline,
-      decorationColor: const Color(0xFF16DB65).withValues(alpha: 0.5),
+      decorationColor: BatikColors.marun.withValues(alpha: 0.5),
     ),
   );
 }
@@ -521,13 +559,13 @@ class ActionChip extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
           color: active
-              ? const Color(0xFF16DB65).withValues(alpha: 0.15)
-              : const Color(0xFF1A1A1A),
+              ? BatikColors.marun.withValues(alpha: 0.15)
+              : BatikColors.krem,
           borderRadius: BorderRadius.circular(6),
           border: Border.all(
             color: active
-                ? const Color(0xFF16DB65).withValues(alpha: 0.5)
-                : const Color(0xFF2A2A2A),
+                ? BatikColors.marun.withValues(alpha: 0.5)
+                : BatikColors.garis,
           ),
         ),
         child: Row(
@@ -536,16 +574,16 @@ class ActionChip extends StatelessWidget {
             Icon(
               icon,
               size: 13,
-              color: active ? const Color(0xFF16DB65) : const Color(0xFFA3A3A3),
+              color: active ? BatikColors.marun : BatikColors.abuTeks,
             ),
             const SizedBox(width: 5),
             Text(
               label,
-              style: GoogleFonts.poppins(
+              style: GoogleFonts.nunitoSans(
                 fontSize: 11,
                 color: active
-                    ? const Color(0xFF16DB65)
-                    : const Color(0xFFA3A3A3),
+                    ? BatikColors.marun
+                    : BatikColors.abuTeks,
                 fontWeight: FontWeight.w500,
               ),
             ),
@@ -648,14 +686,14 @@ class _PendingBubbleState extends State<PendingBubble>
                   vertical: 14,
                 ),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF111111),
+                  color: BatikColors.putih,
                   borderRadius: const BorderRadius.only(
                     topLeft: Radius.circular(4),
                     topRight: Radius.circular(16),
                     bottomLeft: Radius.circular(16),
                     bottomRight: Radius.circular(16),
                   ),
-                  border: Border.all(color: const Color(0xFF1A1A1A)),
+                  border: Border.all(color: BatikColors.garis),
                 ),
                 child: FadeTransition(
                   opacity: _anim,
@@ -669,7 +707,7 @@ class _PendingBubbleState extends State<PendingBubble>
                           width: 7,
                           height: 7,
                           decoration: const BoxDecoration(
-                            color: Color(0xFF16DB65),
+                            color: BatikColors.marun,
                             shape: BoxShape.circle,
                           ),
                         ),
@@ -712,14 +750,14 @@ class DisconnectedBubble extends StatelessWidget {
                 height: 30,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: const Color(0x33FF9800),
+                  color: const Color(0x26C8962E),
                   border: Border.all(
-                    color: const Color(0xFFFF9800).withValues(alpha: 0.4),
+                    color: BatikColors.emas.withValues(alpha: 0.4),
                   ),
                 ),
                 child: const Icon(
                   Icons.wifi_off_rounded,
-                  color: Color(0xFFFF9800),
+                  color: BatikColors.emas,
                   size: 15,
                 ),
               ),
@@ -731,7 +769,7 @@ class DisconnectedBubble extends StatelessWidget {
                     vertical: 14,
                   ),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF1A1200),
+                    color: const Color(0xFFFFF8E7),
                     borderRadius: const BorderRadius.only(
                       topLeft: Radius.circular(4),
                       topRight: Radius.circular(16),
@@ -739,7 +777,7 @@ class DisconnectedBubble extends StatelessWidget {
                       bottomRight: Radius.circular(16),
                     ),
                     border: Border.all(
-                      color: const Color(0xFFFF9800).withValues(alpha: 0.3),
+                      color: BatikColors.emas.withValues(alpha: 0.3),
                     ),
                   ),
                   child: Column(
@@ -747,9 +785,9 @@ class DisconnectedBubble extends StatelessWidget {
                     children: [
                       Text(
                         'Koneksi terputus sebelum jawaban diterima.',
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 13,
-                          color: const Color(0xFFFFB74D),
+                          color: BatikColors.soga,
                           height: 1.5,
                         ),
                       ),
@@ -762,10 +800,10 @@ class DisconnectedBubble extends StatelessWidget {
                             vertical: 8,
                           ),
                           decoration: BoxDecoration(
-                            color: const Color(0xFF2A1A00),
+                            color: BatikColors.krem,
                             borderRadius: BorderRadius.circular(8),
                             border: Border.all(
-                              color: const Color(0xFFFF9800).withValues(alpha: 0.5),
+                              color: BatikColors.emas.withValues(alpha: 0.5),
                             ),
                           ),
                           child: Row(
@@ -773,15 +811,15 @@ class DisconnectedBubble extends StatelessWidget {
                             children: [
                               const Icon(
                                 Icons.refresh_rounded,
-                                color: Color(0xFFFF9800),
+                                color: BatikColors.emas,
                                 size: 14,
                               ),
                               const SizedBox(width: 6),
                               Text(
                                 'Kirim ulang pertanyaan',
-                                style: GoogleFonts.poppins(
+                                style: GoogleFonts.nunitoSans(
                                   fontSize: 12,
-                                  color: const Color(0xFFFF9800),
+                                  color: BatikColors.sogaMuda,
                                   fontWeight: FontWeight.w500,
                                 ),
                               ),
@@ -834,14 +872,14 @@ class StoppedBubble extends StatelessWidget {
                   vertical: 12,
                 ),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF111111),
+                  color: BatikColors.putih,
                   borderRadius: const BorderRadius.only(
                     topLeft: Radius.circular(4),
                     topRight: Radius.circular(16),
                     bottomLeft: Radius.circular(16),
                     bottomRight: Radius.circular(16),
                   ),
-                  border: Border.all(color: const Color(0xFF2A2A2A)),
+                  border: Border.all(color: BatikColors.garis),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -849,7 +887,7 @@ class StoppedBubble extends StatelessWidget {
                     if (response.isNotEmpty) ...[
                       _RichAiContent(data: response),
                       const Divider(
-                        color: Color(0xFF2A2A2A),
+                        color: BatikColors.garis,
                         height: 20,
                         thickness: 1,
                       ),
@@ -858,15 +896,15 @@ class StoppedBubble extends StatelessWidget {
                       children: [
                         const Icon(
                           Icons.stop_circle_outlined,
-                          color: Color(0xFFA3A3A3),
+                          color: BatikColors.abuTeks,
                           size: 14,
                         ),
                         const SizedBox(width: 6),
                         Text(
                           'Generate dihentikan',
-                          style: GoogleFonts.poppins(
+                          style: GoogleFonts.nunitoSans(
                             fontSize: 12,
-                            color: const Color(0xFFA3A3A3),
+                            color: BatikColors.abuTeks,
                           ),
                         ),
                       ],
@@ -922,7 +960,7 @@ class _MessagePairState extends State<MessagePair> {
     if (isMobile) {
       showModalBottomSheet(
         context: context,
-        backgroundColor: const Color(0xFF111111),
+        backgroundColor: BatikColors.putih,
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
         ),
@@ -935,7 +973,7 @@ class _MessagePairState extends State<MessagePair> {
                 width: 40,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF2A2A2A),
+                  color: BatikColors.garis,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -943,11 +981,11 @@ class _MessagePairState extends State<MessagePair> {
               ListTile(
                 leading: const Icon(
                   Icons.edit_outlined,
-                  color: Color(0xFF16DB65),
+                  color: BatikColors.marun,
                 ),
                 title: Text(
                   'Edit pertanyaan',
-                  style: GoogleFonts.poppins(color: Colors.white),
+                  style: GoogleFonts.nunitoSans(color: BatikColors.sogaGelap),
                 ),
                 onTap: () {
                   Navigator.pop(ctx);
@@ -957,11 +995,11 @@ class _MessagePairState extends State<MessagePair> {
               ListTile(
                 leading: const Icon(
                   Icons.copy_rounded,
-                  color: Color(0xFF16DB65),
+                  color: BatikColors.marun,
                 ),
                 title: Text(
                   'Salin pertanyaan',
-                  style: GoogleFonts.poppins(color: Colors.white),
+                  style: GoogleFonts.nunitoSans(color: BatikColors.sogaGelap),
                 ),
                 onTap: () {
                   Navigator.pop(ctx);
@@ -981,14 +1019,14 @@ class _MessagePairState extends State<MessagePair> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF111111),
+        backgroundColor: BatikColors.putih,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: Text(
           'Edit Pertanyaan',
-          style: GoogleFonts.poppins(
+          style: GoogleFonts.nunitoSans(
             fontSize: 15,
-            fontWeight: FontWeight.w600,
-            color: Colors.white,
+            fontWeight: FontWeight.w700,
+            color: BatikColors.sogaGelap,
           ),
         ),
         content: SizedBox(
@@ -997,23 +1035,23 @@ class _MessagePairState extends State<MessagePair> {
             controller: ctrl,
             autofocus: true,
             maxLines: null,
-            style: GoogleFonts.poppins(fontSize: 14, color: Colors.white),
-            cursorColor: const Color(0xFF16DB65),
+            style: GoogleFonts.nunitoSans(fontSize: 14, color: BatikColors.sogaGelap),
+            cursorColor: BatikColors.marun,
             decoration: InputDecoration(
               filled: true,
-              fillColor: const Color(0xFF1A1A1A),
+              fillColor: BatikColors.kertas,
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(10),
-                borderSide: const BorderSide(color: Color(0xFF2A2A2A)),
+                borderSide: const BorderSide(color: BatikColors.garis),
               ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(10),
-                borderSide: const BorderSide(color: Color(0xFF2A2A2A)),
+                borderSide: const BorderSide(color: BatikColors.garis),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(10),
                 borderSide: const BorderSide(
-                  color: Color(0xFF16DB65),
+                  color: BatikColors.marun,
                   width: 1.5,
                 ),
               ),
@@ -1025,12 +1063,13 @@ class _MessagePairState extends State<MessagePair> {
             onPressed: () => Navigator.pop(ctx),
             child: Text(
               'Batal',
-              style: GoogleFonts.poppins(color: const Color(0xFFA3A3A3)),
+              style: GoogleFonts.nunitoSans(color: BatikColors.abuTeks),
             ),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF16DB65),
+              backgroundColor: BatikColors.marun,
+              foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(8),
               ),
@@ -1045,8 +1084,8 @@ class _MessagePairState extends State<MessagePair> {
             },
             child: Text(
               'Simpan',
-              style: GoogleFonts.poppins(
-                color: Colors.black,
+              style: GoogleFonts.nunitoSans(
+                color: Colors.white,
                 fontWeight: FontWeight.w600,
               ),
             ),

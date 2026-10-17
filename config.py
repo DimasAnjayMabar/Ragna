@@ -24,7 +24,7 @@ CONFIG = {
     "reranker_device":   "cuda" if torch.cuda.is_available() else "cpu",
 
     # ── Groq API ──────────────────────────────────────────────────────────────
-    "groq_model":        "llama-3.3-70b-versatile",
+    "groq_model":        "openai/gpt-oss-120b",
 
     # ── ChromaDB — collection utama + memory + identity ──────────────────────
     "chroma_path":         os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db"),
@@ -101,7 +101,7 @@ GROQ_MODEL_REGISTRY = {
         "name": "Llama 3.3 · 70B",
         "provider": "Meta via Groq",
         "tier": "large",
-        "description": "Model terbaik untuk jawaban kompleks (280 t/s). Rekomendasi utama.",
+        "description": "Model besar untuk jawaban kompleks (280 t/s).",
         "tps": 280,
         "tpm_limit": 300000,
     },
@@ -125,7 +125,7 @@ GROQ_MODEL_REGISTRY = {
         "name": "GPT OSS · 120B",
         "provider": "OpenAI via Groq",
         "tier": "large",
-        "description": "Open-weight OpenAI terbesar (500 t/s).",
+        "description": "Open-weight OpenAI terbesar (500 t/s). Rekomendasi utama.",
         "tps": 500,
         "tpm_limit": 6000,
     },

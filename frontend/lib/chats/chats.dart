@@ -11,6 +11,7 @@ import 'package:frontend/chats/service_chats.dart';
 import 'package:frontend/chats/sidebar.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:frontend/chats/batik_theme.dart';
 
 // ---------------------------------------------------------------------------
 // Greetings
@@ -443,23 +444,23 @@ class _ChatsPageState extends State<ChatsPage>
       message = successCount == 1
           ? 'PDF "${files.first.name}" diterima dan sedang diproses.'
           : '$successCount PDF berhasil diterima dan sedang diproses.';
-      color = const Color(0xFF16DB65);
+      color = BatikColors.hijau;
     } else if (successCount == 0) {
       final firstFail = results.firstWhere((r) => r?['success'] != true);
       message =
           firstFail?['detail'] as String? ??
           firstFail?['message'] as String? ??
           'Gagal mengunggah semua file.';
-      color = const Color(0xFFFF4444);
+      color = BatikColors.marun;
     } else {
       message =
           '$successCount berhasil, $failCount gagal. Periksa ulang file yang gagal.';
-      color = const Color(0xFFFFAA00);
+      color = BatikColors.sogaMuda;
     }
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(message, style: GoogleFonts.poppins(fontSize: 13)),
+        content: Text(message, style: GoogleFonts.nunitoSans(fontSize: 13, color: Colors.white)),
         backgroundColor: color,
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 5),
@@ -619,8 +620,8 @@ class _ChatsPageState extends State<ChatsPage>
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(msg, style: GoogleFonts.poppins(fontSize: 13)),
-        backgroundColor: const Color(0xFF111111),
+        content: Text(msg, style: GoogleFonts.nunitoSans(fontSize: 13, color: Colors.white)),
+        backgroundColor: BatikColors.sogaGelap,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
@@ -696,7 +697,7 @@ class _ChatsPageState extends State<ChatsPage>
     );
 
     return Scaffold(
-      backgroundColor: const Color(0xFF020202),
+      backgroundColor: BatikColors.kertas,
       body: isMobile
           ? Stack(
               children: [
@@ -742,7 +743,7 @@ class _ChatsPageState extends State<ChatsPage>
     if (_loadingMessages) {
       return const Center(
         child: CircularProgressIndicator(
-          color: Color(0xFF16DB65),
+          color: BatikColors.marun,
           strokeWidth: 2,
         ),
       );
@@ -965,9 +966,9 @@ class _QuestionNavigatorState extends State<_QuestionNavigator>
               width: 20,
               child: Text(
                 '${globalIdx + 1}.',
-                style: GoogleFonts.poppins(
+                style: GoogleFonts.nunitoSans(
                   fontSize: 11,
-                  color: const Color(0xFF16DB65),
+                  color: BatikColors.marun,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -976,9 +977,9 @@ class _QuestionNavigatorState extends State<_QuestionNavigator>
             Expanded(
               child: Text(
                 preview,
-                style: GoogleFonts.poppins(
+                style: GoogleFonts.nunitoSans(
                   fontSize: 11,
-                  color: const Color(0xFFCCCCCC),
+                  color: BatikColors.sogaGelap,
                   height: 1.4,
                 ),
                 maxLines: 2,
@@ -1023,8 +1024,8 @@ class _QuestionNavigatorState extends State<_QuestionNavigator>
                     height: 72,
                     decoration: BoxDecoration(
                       color: _panelVisible
-                          ? const Color(0xFF16DB65).withValues(alpha: 0.15)
-                          : const Color(0xFF1A1A1A).withValues(alpha: 0.85),
+                          ? BatikColors.marun.withValues(alpha: 0.15)
+                          : BatikColors.krem,
                       borderRadius: const BorderRadius.only(
                         topRight: Radius.circular(8),
                         bottomRight: Radius.circular(8),
@@ -1032,18 +1033,18 @@ class _QuestionNavigatorState extends State<_QuestionNavigator>
                       border: Border(
                         top: BorderSide(
                           color: _panelVisible
-                              ? const Color(0xFF16DB65).withValues(alpha: 0.4)
-                              : const Color(0xFF2A2A2A),
+                              ? BatikColors.marun.withValues(alpha: 0.4)
+                              : BatikColors.garis,
                         ),
                         right: BorderSide(
                           color: _panelVisible
-                              ? const Color(0xFF16DB65).withValues(alpha: 0.4)
-                              : const Color(0xFF2A2A2A),
+                              ? BatikColors.marun.withValues(alpha: 0.4)
+                              : BatikColors.garis,
                         ),
                         bottom: BorderSide(
                           color: _panelVisible
-                              ? const Color(0xFF16DB65).withValues(alpha: 0.4)
-                              : const Color(0xFF2A2A2A),
+                              ? BatikColors.marun.withValues(alpha: 0.4)
+                              : BatikColors.garis,
                         ),
                       ),
                     ),
@@ -1058,8 +1059,8 @@ class _QuestionNavigatorState extends State<_QuestionNavigator>
                             margin: const EdgeInsets.symmetric(vertical: 2),
                             decoration: BoxDecoration(
                               color: _panelVisible
-                                  ? const Color(0xFF16DB65)
-                                  : const Color(0xFF555555),
+                                  ? BatikColors.marun
+                                  : BatikColors.abuTeks,
                               shape: BoxShape.circle,
                             ),
                           ),
@@ -1079,12 +1080,12 @@ class _QuestionNavigatorState extends State<_QuestionNavigator>
                       height: 150,
                       margin: const EdgeInsets.only(left: 4),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF0F0F0F),
+                        color: BatikColors.putih,
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: const Color(0xFF2A2A2A)),
+                        border: Border.all(color: BatikColors.garis),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.4),
+                            color: BatikColors.sogaGelap.withValues(alpha: 0.15),
                             blurRadius: 12,
                             offset: const Offset(2, 4),
                           ),
@@ -1099,30 +1100,30 @@ class _QuestionNavigatorState extends State<_QuestionNavigator>
                                 const Icon(
                                   Icons.format_list_bulleted_rounded,
                                   size: 13,
-                                  color: Color(0xFF16DB65),
+                                  color: BatikColors.marun,
                                 ),
                                 const SizedBox(width: 6),
                                 Text(
                                   'Daftar Pertanyaan',
-                                  style: GoogleFonts.poppins(
+                                  style: GoogleFonts.nunitoSans(
                                     fontSize: 11,
                                     fontWeight: FontWeight.w600,
-                                    color: const Color(0xFF16DB65),
+                                    color: BatikColors.marun,
                                   ),
                                 ),
                                 const Spacer(),
                                 if (_totalPages > 1)
                                   Text(
                                     '${_page + 1}/$_totalPages',
-                                    style: GoogleFonts.poppins(
+                                    style: GoogleFonts.nunitoSans(
                                       fontSize: 10,
-                                      color: const Color(0xFF555555),
+                                      color: BatikColors.abuTeks,
                                     ),
                                   ),
                               ],
                             ),
                           ),
-                          const Divider(height: 1, color: Color(0xFF1A1A1A)),
+                          const Divider(height: 1, color: BatikColors.garis),
 
                           if (_visibleMessages.length > 3)
                             Expanded(
@@ -1146,7 +1147,7 @@ class _QuestionNavigatorState extends State<_QuestionNavigator>
                             ),
 
                           if (_totalPages > 1) ...[
-                            const Divider(height: 1, color: Color(0xFF1A1A1A)),
+                            const Divider(height: 1, color: BatikColors.garis),
                             Padding(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 8,
@@ -1164,9 +1165,9 @@ class _QuestionNavigatorState extends State<_QuestionNavigator>
                                     '${_page * _kPageSize + 1}–'
                                     '${_page * _kPageSize + _currentPageMessages.length}'
                                     ' / ${_visibleMessages.length}',
-                                    style: GoogleFonts.poppins(
+                                    style: GoogleFonts.nunitoSans(
                                       fontSize: 10,
-                                      color: const Color(0xFF555555),
+                                      color: BatikColors.abuTeks,
                                     ),
                                   ),
                                   _NavButton(
@@ -1207,16 +1208,16 @@ class _NavButton extends StatelessWidget {
         width: 26,
         height: 26,
         decoration: BoxDecoration(
-          color: enabled ? const Color(0xFF1A1A1A) : const Color(0xFF111111),
+          color: enabled ? BatikColors.krem : BatikColors.kertas,
           borderRadius: BorderRadius.circular(6),
           border: Border.all(
-            color: enabled ? const Color(0xFF2A2A2A) : const Color(0xFF1A1A1A),
+            color: enabled ? BatikColors.garis : BatikColors.garis,
           ),
         ),
         child: Icon(
           icon,
           size: 16,
-          color: enabled ? const Color(0xFFA3A3A3) : const Color(0xFF333333),
+          color: enabled ? BatikColors.soga : BatikColors.abuTeks.withValues(alpha: 0.4),
         ),
       ),
     );
@@ -1246,8 +1247,8 @@ class _ChatTopBar extends StatelessWidget {
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: const BoxDecoration(
-        color: Color(0xFF0D0D0D),
-        border: Border(bottom: BorderSide(color: Color(0xFF1A1A1A))),
+        color: BatikColors.marun,
+        border: Border(bottom: BorderSide(color: BatikColors.marunGelap)),
       ),
       child: Row(
         children: [
@@ -1260,12 +1261,12 @@ class _ChatTopBar extends StatelessWidget {
                 padding: const EdgeInsets.all(7),
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFF1A1A1A)),
+                  border: Border.all(color: Colors.white24),
                 ),
                 child: Icon(
                   sidebarOpen ? Icons.menu_open_rounded : Icons.menu_rounded,
                   size: 18,
-                  color: const Color(0xFFA3A3A3),
+                  color: Colors.white,
                 ),
               ),
             ),
@@ -1276,7 +1277,7 @@ class _ChatTopBar extends StatelessWidget {
               title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: GoogleFonts.poppins(
+              style: GoogleFonts.nunitoSans(
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
                 color: Colors.white,
@@ -1294,10 +1295,10 @@ class _ChatTopBar extends StatelessWidget {
                   const SizedBox(width: 5),
                   Text(
                     'Memproses',
-                    style: GoogleFonts.poppins(
+                    style: GoogleFonts.nunitoSans(
                       fontSize: 11,
-                      color: const Color(0xFF16DB65),
-                      fontWeight: FontWeight.w500,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ],
@@ -1341,7 +1342,7 @@ class _PulsingDotState extends State<_PulsingDot>
       width: 7,
       height: 7,
       decoration: const BoxDecoration(
-        color: Color(0xFF16DB65),
+        color: BatikColors.emas,
         shape: BoxShape.circle,
       ),
     ),
@@ -1368,16 +1369,16 @@ class _GreetingView extends StatelessWidget {
               width: 64,
               height: 64,
               decoration: BoxDecoration(
-                color: const Color(0x3316DB65),
+                color: const Color(0x1A8B251E),
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: const Color(0xFF16DB65).withValues(alpha: 0.4),
+                  color: BatikColors.marun.withValues(alpha: 0.4),
                   width: 1.5,
                 ),
               ),
               child: const Icon(
                 Icons.account_tree_rounded, // Icon Graph RAG
-                color: Color(0xFF16DB65),
+                color: BatikColors.marun,
                 size: 30,
               ),
             ),
@@ -1385,20 +1386,20 @@ class _GreetingView extends StatelessWidget {
             Text(
               greeting,
               textAlign: TextAlign.center,
-              style: GoogleFonts.poppins(
-                fontSize: 16,
-                fontWeight: FontWeight.w500,
-                color: Colors.white,
-                height: 1.6,
+              style: GoogleFonts.playfairDisplay(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: BatikColors.sogaGelap,
+                height: 1.5,
               ),
             ),
             const SizedBox(height: 10),
             Text(
               'Ketik pertanyaan Anda di bawah untuk memulai percakapan dengan Ragna.',
               textAlign: TextAlign.center,
-              style: GoogleFonts.poppins(
+              style: GoogleFonts.nunitoSans(
                 fontSize: 13,
-                color: const Color(0xFFA3A3A3),
+                color: BatikColors.abuTeks,
               ),
             ),
           ],
