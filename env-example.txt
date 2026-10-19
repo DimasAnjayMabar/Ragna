@@ -6,3 +6,6 @@ MAIL_USERNAME= your mail server username
 MAIL_PASSWORD= your mail server password
 MAIL_FROM= your main email (ex: noreply@gmail.com)
 HF_TOKEN="your hugging face key"
+NEO4J_URI="your neo4j uri"
+NEO4J_USER="your neo4j username"
+NEO4J_PASS="your neo4j password"
