@@ -44,6 +44,80 @@ PARENT_DIR = Path(__file__).resolve().parent.parent
 if str(PARENT_DIR) not in sys.path:
     sys.path.insert(0, str(PARENT_DIR))
 
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# ENV LOADER (multi-location .env — mirrors the Go launcher)
+# =============================================================================
+
+def _load_env_files() -> Optional[Path]:
+    """
+    Cari .env di beberapa lokasi (cwd, parent, grandparent, PARENT_DIR).
+    Tidak override env yang sudah ada (os.environ.setdefault).
+    Return path .env yang ditemukan, atau None.
+    """
+    candidates: List[Path] = []
+    try:
+        cwd = Path.cwd()
+        candidates += [cwd, cwd.parent, cwd.parent.parent]
+    except Exception:
+        pass
+    candidates.append(PARENT_DIR)
+
+    seen: set = set()
+    for base in candidates:
+        try:
+            envfile = (base / ".env").resolve()
+        except Exception:
+            continue
+        if envfile in seen:
+            continue
+        seen.add(envfile)
+        if envfile.is_file():
+            logger.info("[env] loading %s", envfile)
+            try:
+                for raw in envfile.read_text(encoding="utf-8").splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    # Do not override env yang sudah ada.
+                    os.environ.setdefault(k, v)
+            except Exception as e:
+                logger.warning("[env] failed to read %s: %s", envfile, e)
+                continue
+            return envfile
+    return None
+
+
+# Prefer python-dotenv if available (still respects setdefault semantics
+# via override=False), but always run the manual loader as a fallback.
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+_env_found = _load_env_files()
+if _env_found is None and load_dotenv:
+    # Last resort: let python-dotenv search from cwd.
+    try:
+        load_dotenv(override=False)
+    except Exception:
+        pass
+
+
+# =============================================================================
+# HF_TOKEN SETUP
+# =============================================================================
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
+
+
 # =============================================================================
 # IMPORTS FROM ROOT
 # =============================================================================
@@ -89,38 +163,36 @@ except ImportError:
 
 
 # =============================================================================
-# ENV & HF_TOKEN SETUP (WITH FALLBACK)
-# =============================================================================
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-
-if load_dotenv:
-    root_env_path = PARENT_DIR / ".env"
-    if root_env_path.exists():
-        load_dotenv(dotenv_path=root_env_path)
-    else:
-        load_dotenv()
-
-HF_TOKEN = os.getenv("HF_TOKEN")
-if HF_TOKEN:
-    os.environ["HF_TOKEN"] = HF_TOKEN
-    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
-
-# No print() at module level — HF_TOKEN info is logged in _setup_cli_logging().
-
-logger = logging.getLogger(__name__)
-
-
-# =============================================================================
 # LOAD CONFIGURATION FROM CONFIG.PY
 # =============================================================================
 
-# Neo4j Settings
-NEO4J_URI      = CONFIG.get("neo4j_uri", "neo4j://127.0.0.1:7687")
-NEO4J_USER     = CONFIG.get("neo4j_user", "neo4j")
-NEO4J_PASSWORD = CONFIG.get("neo4j_password", "password")
+# Neo4j Settings — env aliases supported (NEO4J_USER / NEO4J_USERNAME,
+# NEO4J_PASS / NEO4J_PASSWORD). Do NOT hard-fail here; module may be imported
+# by test/dashboard contexts. Fail-fast happens inside Neo4jIngestor()
+# via _require_neo4j_env().
+NEO4J_URI  = os.getenv("NEO4J_URI", "")
+NEO4J_USER = os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME", "")
+NEO4J_PASS = os.getenv("NEO4J_PASS") or os.getenv("NEO4J_PASSWORD", "")
+
+
+def _require_neo4j_env() -> None:
+    """Raise a clear error if any Neo4j env var is missing."""
+    missing = [
+        name
+        for name, value in (
+            ("NEO4J_URI", NEO4J_URI),
+            ("NEO4J_USER (or NEO4J_USERNAME)", NEO4J_USER),
+            ("NEO4J_PASS (or NEO4J_PASSWORD)", NEO4J_PASS),
+        )
+        if not value
+    ]
+    if missing:
+        raise EnvironmentError(
+            "Neo4j environment variables missing: "
+            + ", ".join(missing)
+            + ". Add them to .env (NEO4J_URI, NEO4J_USER, NEO4J_PASS)."
+        )
+
 
 # ChromaDB Settings
 raw_chroma_path = CONFIG.get("chroma_path", "chroma_db")
@@ -839,9 +911,17 @@ def build_isi_nodes(lines: List[Dict], jurnal_id: str) -> List[IsiNode]:
 # =============================================================================
 
 class Neo4jIngestor:
-    def __init__(self, uri: str = NEO4J_URI, user: str = NEO4J_USER, password: str = NEO4J_PASSWORD):
+    def __init__(
+        self,
+        uri: str = NEO4J_URI,
+        user: str = NEO4J_USER,
+        password: str = NEO4J_PASS,
+    ):
+        if not uri or not user or not password:
+            _require_neo4j_env()
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
-        logger.info("Neo4j connected: %s", uri)
+        self.driver.verify_connectivity()
+        logger.info("Neo4j connected: %s (user=%s)", uri, user)
 
     def close(self):
         self.driver.close()
@@ -1287,7 +1367,10 @@ def run_pipeline_raw(
 
         safe_chunks: List[str] = []
         try:
-            _raw_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+            _require_neo4j_env()
+            _raw_driver = GraphDatabase.driver(
+                NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS)
+            )
             try:
                 _raw_driver.verify_connectivity()
                 suspicious = scan_chunks_against_instructions(chunks, _raw_driver, lang="id")
@@ -1382,7 +1465,7 @@ def run_pipeline_with_shared_resources(
         rag_models  = pipeline.models
 
         # P1: use the pipeline's Chroma client (shared, not a new one)
-        neo4j  = Neo4jIngestor(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD)
+        neo4j  = Neo4jIngestor(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASS)
         chroma = ChromaIngestor(client=pipeline.chroma.client)
         try:
             return run_pipeline(pdf_path, jurnal_metadata, rag_models, neo4j, chroma)
@@ -1467,16 +1550,28 @@ def main():
     parser.add_argument("--chroma",          default=CHROMA_PATH)
     parser.add_argument("--neo4j-uri",       default=NEO4J_URI)
     parser.add_argument("--neo4j-user",      default=NEO4J_USER)
-    parser.add_argument("--neo4j-password",  default=NEO4J_PASSWORD)
+    parser.add_argument(
+        "--neo4j-password",
+        default=NEO4J_PASS,
+        help="Override NEO4J_PASS / NEO4J_PASSWORD from .env",
+    )
     parser.add_argument("--file",            help="Process a single file (.pdf or .txt)")
     parser.add_argument("--max-tokens",      type=int, default=MAX_TOKENS_PER_CHUNK)
     args = parser.parse_args()
 
     MAX_TOKENS_PER_CHUNK = args.max_tokens
 
+    # Fail-fast Neo4j env check with a friendly message (same shape as Go launcher)
+    try:
+        _require_neo4j_env()
+    except EnvironmentError as e:
+        logger.error("neo4j FAIL: %s", e)
+        sys.exit(1)
+
     logger.info("Dataset path : %s", args.dataset)
     logger.info("ChromaDB path: %s", args.chroma)
     logger.info("Neo4j URI    : %s", args.neo4j_uri)
+    logger.info("Neo4j user   : %s", args.neo4j_user)
 
     # P2: use embedding_only=True — no reranker/Groq/NLP needed.
     #     This avoids EnvironmentError when GROQ_API_KEY is not set.

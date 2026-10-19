@@ -31,11 +31,13 @@ var (
 )
 
 const (
-	EM_SETSEL      = 0x00B1
-	EM_REPLACESEL  = 0x00C2
-	EM_SCROLLCARET = 0x00B7
-	WM_VSCROLL     = 0x0115
-	SB_BOTTOM      = 7
+	EM_SETSEL       = 0x00B1
+	EM_REPLACESEL   = 0x00C2
+	EM_SCROLLCARET  = 0x00B7
+	EM_GETLINECOUNT = 0x00BA
+	EM_LINEINDEX    = 0x00BB
+	WM_VSCROLL      = 0x0115
+	SB_BOTTOM       = 7
 
 	MB_OK            = 0x00000000
 	MB_ICONERROR     = 0x00000010
@@ -43,17 +45,60 @@ const (
 
 	// CREATE_NO_WINDOW — prevents a console window for the child process
 	CREATE_NO_WINDOW = 0x08000000
+
+	// Batas maksimum line per panel log. Kalau lewat, line paling lama
+	// dihapus dari atas supaya tidak kena limit internal EDIT control.
+	maxLinesPerEdit = 5000
 )
+
+// emptyUTF16 — pointer ke UTF-16 NUL tunggal, dipakai untuk EM_REPLACESEL
+// saat menghapus selection (string kosong biasa tidak selalu bekerja).
+var emptyUTF16 = []uint16{0}
 
 func sendMessage(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	ret, _, _ := procSendMessageW.Call(hwnd, uintptr(msg), wParam, lParam)
 	return ret
 }
 
+func getLineCount(edit *winc.MultiEdit) int {
+	return int(sendMessage(edit.Handle(), EM_GETLINECOUNT, 0, 0))
+}
+
+// trimOldLines menghapus line paling atas sampai tersisa <= maxLines-1,
+// supaya ada slot untuk line baru yang akan di-append.
+func trimOldLines(edit *winc.MultiEdit, maxLines int) {
+	count := getLineCount(edit)
+	if count <= maxLines {
+		return
+	}
+
+	// Hapus (count - maxLines + 1) line dari atas
+	linesToRemove := count - maxLines + 1
+
+	// EM_LINEINDEX(line) → character index awal line tsb.
+	// Kalau baris tidak ada, return -1.
+	lineIdx := int(sendMessage(edit.Handle(), EM_LINEINDEX, uintptr(linesToRemove), 0))
+	if lineIdx <= 0 {
+		// fallback: hapus semua
+		edit.SetText("")
+		return
+	}
+
+	// Select [0, lineIdx) — ini tepat menghapus linesToRemove line
+	// beserta CRLF-nya (EM_LINEINDEX menunjuk ke char pertama line berikutnya).
+	sendMessage(edit.Handle(), EM_SETSEL, 0, uintptr(lineIdx))
+	// EM_REPLACESEL dengan UTF16 NUL tunggal → hapus selection
+	sendMessage(edit.Handle(), EM_REPLACESEL, 0, uintptr(unsafe.Pointer(&emptyUTF16[0])))
+}
+
 func appendToEdit(edit *winc.MultiEdit, text string) {
 	if text == "" {
 		return
 	}
+
+	// Trim SEBELUM append supaya tidak pernah kena limit internal EDIT control.
+	trimOldLines(edit, maxLinesPerEdit)
+
 	line := text + "\r\n"
 	ptr, err := syscall.UTF16PtrFromString(line)
 	if err != nil {
@@ -186,26 +231,193 @@ func resolvePythonAndWorkDir() (string, string, error) {
 }
 
 // =============================================================================
+// WINDOWS JOB OBJECT — jaminan kill-on-close untuk seluruh process tree
+//
+// Dengan Job Object + JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, saat handle job
+// ditutup (baik normal maupun karena proses launcher mati), OS otomatis
+// membunuh SEMUA proses yang ter-assign — tanpa bergantung pada taskkill.
+// =============================================================================
+
+var (
+	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
+	procCreateJobObjectW         = kernel32.NewProc("CreateJobObjectW")
+	procAssignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
+	procSetInformationJobObject  = kernel32.NewProc("SetInformationJobObject")
+	procCloseHandle              = kernel32.NewProc("CloseHandle")
+)
+
+// JOBOBJECT_EXTENDED_LIMIT_INFORMATION layout (x64).
+// Kita hanya butuh field BasicLimitInformation.LimitFlags (offset 16 dari awal).
+// Struct penuh: JOBOBJECT_BASIC_LIMIT_INFORMATION (64 bytes) +
+// IO_COUNTERS (48 bytes) + SIZE_T x2 (16 bytes) = 128 bytes.
+type jobObjectExtendedLimitInformation struct {
+	BasicLimitInformation struct {
+		PerProcessUserTimeLimit int64
+		PerJobUserTimeLimit     int64
+		LimitFlags              uint32
+		MinimumWorkingSetSize   uintptr
+		MaximumWorkingSetSize   uintptr
+		ActiveProcessLimit      uint32
+		Affinity                uintptr
+		PriorityClass           uint32
+		SchedulingClass         uint32
+	}
+	IoInfo struct {
+		ReadOperationCount  uint64
+		WriteOperationCount uint64
+		OtherOperationCount uint64
+		ReadTransferCount   uint64
+		WriteTransferCount  uint64
+		OtherTransferCount  uint64
+	}
+	ProcessMemoryLimit  uintptr
+	JobMemoryLimit      uintptr
+	PeakProcessMemoryUsed uintptr
+	PeakJobMemoryUsed     uintptr
+}
+
+const (
+	JobObjectExtendedLimitInformationClass = 9
+	JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE     = 0x00002000
+)
+
+var (
+	jobHandle     syscall.Handle
+	jobHandleOnce sync.Once
+	jobHandleErr  error
+)
+
+// ensureJobObject membuat (sekali) job object dengan KILL_ON_JOB_CLOSE.
+func ensureJobObject() (syscall.Handle, error) {
+	jobHandleOnce.Do(func() {
+		h, _, err := procCreateJobObjectW.Call(0, 0)
+		if h == 0 {
+			jobHandleErr = fmt.Errorf("CreateJobObjectW failed: %v", err)
+			return
+		}
+		jobHandle = syscall.Handle(h)
+
+		var info jobObjectExtendedLimitInformation
+		info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+		ret, _, err := procSetInformationJobObject.Call(
+			uintptr(jobHandle),
+			uintptr(JobObjectExtendedLimitInformationClass),
+			uintptr(unsafe.Pointer(&info)),
+			unsafe.Sizeof(info),
+		)
+		if ret == 0 {
+			jobHandleErr = fmt.Errorf("SetInformationJobObject failed: %v", err)
+			procCloseHandle.Call(uintptr(jobHandle))
+			jobHandle = 0
+		}
+	})
+	return jobHandle, jobHandleErr
+}
+
+// assignToJobObject menambahkan proses ke job object global.
+func assignToJobObject(pid int) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	h, err := ensureJobObject()
+	if err != nil {
+		return err
+	}
+	// PROCESS_SET_QUOTA (0x0100) | PROCESS_TERMINATE (0x0001)
+	procHandle, err := syscall.OpenProcess(0x0100|0x0001, false, uint32(pid))
+	if err != nil {
+		return err
+	}
+	defer syscall.CloseHandle(procHandle)
+
+	ret, _, callErr := procAssignProcessToJobObject.Call(
+		uintptr(h), uintptr(procHandle),
+	)
+	if ret == 0 {
+		return fmt.Errorf("AssignProcessToJobObject failed: %v", callErr)
+	}
+	return nil
+}
+
+// killJobObject menutup job handle → OS kill semua proses di dalamnya.
+// Setelah ini, job object tidak bisa dipakai lagi; panggil ulang
+// ensureJobObject akan membuat instance baru (jobHandleOnce tidak reset,
+// jadi untuk pemakaian ulang kita expose resetJobObject).
+func killJobObject() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	if jobHandle != 0 {
+		procCloseHandle.Call(uintptr(jobHandle))
+		jobHandle = 0
+	}
+	// Reset once supaya start berikutnya membuat job baru
+	jobHandleOnce = sync.Once{}
+}
+
+// =============================================================================
 // PROCESS TREE KILLER
 // =============================================================================
 
-// killProcessTree membunuh seluruh process tree (parent + children).
-//
-// Windows: taskkill /F /T /PID <pid>
-// Unix: SIGTERM ke process.
-func killProcessTree(pid int) {
+// processAlive cek apakah PID masih hidup.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
 	if runtime.GOOS == "windows" {
-		killCmd := exec.Command(
-			"taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", pid),
-		)
-		killCmd.SysProcAttr = &syscall.SysProcAttr{
+		cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/NH")
+		cmd.SysProcAttr = &syscall.SysProcAttr{
 			HideWindow:    true,
 			CreationFlags: CREATE_NO_WINDOW,
 		}
-		_ = killCmd.Run()
+		out, err := cmd.Output()
+		if err != nil {
+			return false
+		}
+		s := strings.ToLower(string(out))
+		if strings.Contains(s, "no tasks") {
+			return false
+		}
+		return strings.Contains(s, strconv.Itoa(pid))
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// killProcessTree membunuh seluruh process tree (parent + children).
+//
+// Windows: taskkill /F /T /PID <pid> + verifikasi + retry sekali.
+// Unix: SIGTERM, tunggu, SIGKILL kalau masih hidup.
+func killProcessTree(pid int) {
+	if pid <= 0 {
+		return
+	}
+	if runtime.GOOS == "windows" {
+		for attempt := 0; attempt < 2; attempt++ {
+			killCmd := exec.Command(
+				"taskkill", "/F", "/T", "/PID", strconv.Itoa(pid),
+			)
+			killCmd.SysProcAttr = &syscall.SysProcAttr{
+				HideWindow:    true,
+				CreationFlags: CREATE_NO_WINDOW,
+			}
+			_ = killCmd.Run()
+			if !processAlive(pid) {
+				return
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
 	} else {
 		if proc, err := os.FindProcess(pid); err == nil {
 			_ = proc.Signal(syscall.SIGTERM)
+			time.Sleep(300 * time.Millisecond)
+			if processAlive(pid) {
+				_ = proc.Signal(syscall.SIGKILL)
+			}
 		}
 	}
 }
@@ -263,7 +475,9 @@ func findViaPowerShell() []int {
 		`$_.CommandLine -like '*multiprocessing.resource_tracker*' -or ` +
 		`$_.CommandLine -like '*uvicorn*' -or ` +
 		`$_.CommandLine -like '*watchfiles*' -or ` +
-		`$_.CommandLine -like '*python.exe' ` +
+		// Idle multiprocessing child: command line hanya path python.exe
+		// (tidak ada argumen setelah .exe)
+		`($_.CommandLine -match 'pythonw?\.exe"?\s*$') ` +
 		`} | ` +
 		`Select-Object -ExpandProperty ProcessId`
 
@@ -349,6 +563,7 @@ func parseWmicCSV(out string) []int {
 	}
 	return pids
 }
+
 // =============================================================================
 // DATA
 // =============================================================================
@@ -442,6 +657,20 @@ func startPython(workDir, pythonExe string) (*exec.Cmd, context.CancelFunc, erro
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, nil, err
+	}
+
+	// Assign ke Job Object supaya seluruh tree otomatis dibunuh saat
+	// launcher mati / job handle ditutup.
+	if runtime.GOOS == "windows" {
+		if err := assignToJobObject(cmd.Process.Pid); err != nil {
+			// Non-fatal: kita masih punya taskkill + orphan scan sebagai backup.
+			AppendLog(LogEvent{
+				TS:      time.Now().Format("15:04:05"),
+				Level:   "WARN",
+				Channel: "init",
+				Msg:     "Job Object assign failed (using taskkill fallback): " + err.Error(),
+			})
+		}
 	}
 
 	go readStream(stdout, false)
@@ -571,6 +800,67 @@ func handleLog(line string) {
 }
 
 // =============================================================================
+// STOP HELPERS — dipakai Stop button & window close
+// =============================================================================
+
+// stopAllProcesses membunuh semua target + rescan + retry sampai bersih
+// (atau maxRounds habis). Blocking; panggil dari goroutine kalau tidak mau
+// freeze UI.
+func stopAllProcesses(
+	targets map[int]struct{},
+	cmd *exec.Cmd,
+	cancel context.CancelFunc,
+	orphanPIDsPtr *[]int,
+	orphanMutex *sync.Mutex,
+	maxRounds int,
+) bool {
+	// Cancel context dulu — biar exec.CommandContext ikut terminate
+	if cancel != nil {
+		cancel()
+	}
+
+	for round := 0; round < maxRounds; round++ {
+		// Kill semua target saat ini
+		for pid := range targets {
+			killProcessTree(pid)
+		}
+
+		// Tunggu sebentar
+		time.Sleep(300 * time.Millisecond)
+
+		// Rescan orphan — tangkap child baru / yang lolos
+		pids := findOrphanPythonProcesses()
+
+		orphanMutex.Lock()
+		*orphanPIDsPtr = pids
+		orphanMutex.Unlock()
+
+		// Tambah PID baru ke target
+		newFound := false
+		for _, p := range pids {
+			if _, ok := targets[p]; !ok {
+				targets[p] = struct{}{}
+				newFound = true
+			}
+		}
+
+		// Cek apakah semua target sudah mati
+		allDead := true
+		for pid := range targets {
+			if processAlive(pid) {
+				allDead = false
+				break
+			}
+		}
+
+		if allDead && !newFound && len(pids) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// =============================================================================
 // GUI
 // =============================================================================
 
@@ -671,10 +961,7 @@ func main() {
 	scanTicker := time.NewTicker(3 * time.Second)
 
 	// ── updateUptimeLabel ───────────────────────────────────────────
-	// Update label uptime: kalau ada orphan dan tidak ada server aktif,
-	// tampilkan pesan orphan sebagai hint.
 	updateUptimeLabel := func() {
-		// Cek orphan dulu
 		orphanMutex.Lock()
 		orphanCount := len(orphanPIDs)
 		orphanMutex.Unlock()
@@ -683,13 +970,11 @@ func main() {
 		hasCurrent := currentCmd != nil
 		cmdMutex.Unlock()
 
-		// Kalau ada orphan tapi tidak ada server aktif → pesan warning
 		if orphanCount > 0 && !hasCurrent {
 			lblUptime.SetText(fmt.Sprintf("⚠ %d orphan process", orphanCount))
 			return
 		}
 
-		// Default: tampilkan uptime
 		uptimeMutex.Lock()
 		var d time.Duration
 		if uptimeRunning {
@@ -706,7 +991,6 @@ func main() {
 	}
 
 	// ── updateStopButtonState ───────────────────────────────────────
-	// Enable tombol Stop kalau ada currentCmd ATAU ada orphan.
 	updateStopButtonState := func() {
 		cmdMutex.Lock()
 		hasCurrent := currentCmd != nil
@@ -787,10 +1071,8 @@ func main() {
 			for _, pid := range orphans {
 				killProcessTree(pid)
 			}
-			// Beri waktu OS release port + VRAM
 			time.Sleep(700 * time.Millisecond)
 
-			// Refresh orphan state
 			pids := findOrphanPythonProcesses()
 			orphanMutex.Lock()
 			orphanPIDs = pids
@@ -820,7 +1102,6 @@ func main() {
 		currentCancel = cancel
 		cmdMutex.Unlock()
 
-		// Reset & start uptime
 		uptimeMutex.Lock()
 		uptimeStart = time.Now()
 		uptimeFrozen = 0
@@ -835,7 +1116,6 @@ func main() {
 		go func() {
 			err := cmd.Wait()
 
-			// Freeze uptime
 			uptimeMutex.Lock()
 			if uptimeRunning {
 				uptimeFrozen = time.Since(uptimeStart)
@@ -882,11 +1162,8 @@ func main() {
 	btnStop.OnClick().Bind(func(e *winc.Event) {
 		cmdMutex.Lock()
 		cmd := currentCmd
+		cancel := currentCancel
 		cmdMutex.Unlock()
-
-		orphanMutex.Lock()
-		orphans := append([]int{}, orphanPIDs...)
-		orphanMutex.Unlock()
 
 		// Freeze uptime dulu
 		uptimeMutex.Lock()
@@ -896,48 +1173,63 @@ func main() {
 		}
 		uptimeMutex.Unlock()
 
-		// Kasus 1: currentCmd ada — kill tree
+		// Kumpulkan semua PID target: current + orphan
+		targets := map[int]struct{}{}
 		if cmd != nil && cmd.Process != nil {
-			AppendLog(LogEvent{
-				TS:      time.Now().Format("15:04:05"),
-				Level:   "WARN",
-				Channel: "init",
-				Msg:     "Stopping server (current process tree)...",
-			})
-			killProcessTree(cmd.Process.Pid)
+			targets[cmd.Process.Pid] = struct{}{}
 		}
-
-		// Kasus 2: orphan ada — kill satu per satu
-		if len(orphans) > 0 {
-			AppendLog(LogEvent{
-				TS:      time.Now().Format("15:04:05"),
-				Level:   "WARN",
-				Channel: "init",
-				Msg:     fmt.Sprintf("Cleaning %d orphan process(es)...", len(orphans)),
-			})
-			for _, pid := range orphans {
-				killProcessTree(pid)
-			}
+		orphanMutex.Lock()
+		for _, pid := range orphanPIDs {
+			targets[pid] = struct{}{}
 		}
+		orphanMutex.Unlock()
 
-		if cmd == nil && len(orphans) == 0 {
+		if len(targets) == 0 {
 			AppendLog(LogEvent{
 				TS:      time.Now().Format("15:04:05"),
 				Level:   "INFO",
 				Channel: "init",
 				Msg:     "No process to stop.",
 			})
+			updateUptimeLabel()
+			return
 		}
 
-		updateUptimeLabel()
+		AppendLog(LogEvent{
+			TS:      time.Now().Format("15:04:05"),
+			Level:   "WARN",
+			Channel: "init",
+			Msg:     fmt.Sprintf("Stopping %d process(es) (full tree)...", len(targets)),
+		})
 
-		// Refresh state setelah kill — trigger scan manual
+		// Disable Stop sebentar supaya tidak double-click
+		btnStop.SetEnabled(false)
+
+		// Kill + retry loop di background (jangan block UI)
 		go func() {
-			time.Sleep(700 * time.Millisecond)
-			pids := findOrphanPythonProcesses()
-			orphanMutex.Lock()
-			orphanPIDs = pids
-			orphanMutex.Unlock()
+			ok := stopAllProcesses(targets, cmd, cancel, &orphanPIDs, &orphanMutex, 10)
+			if ok {
+				AppendLog(LogEvent{
+					TS:      time.Now().Format("15:04:05"),
+					Level:   "INFO",
+					Channel: "init",
+					Msg:     "✓ All processes stopped.",
+				})
+			} else {
+				AppendLog(LogEvent{
+					TS:      time.Now().Format("15:04:05"),
+					Level:   "ERROR",
+					Channel: "init",
+					Msg:     "⚠ Some processes still alive after max retries. Check Task Manager.",
+				})
+			}
+
+			// Reset currentCmd/cancel — cmd.Wait() di goroutine monitor
+			// akan menangani sisanya.
+			cmdMutex.Lock()
+			currentCancel = nil
+			cmdMutex.Unlock()
+
 			updateStopButtonState()
 			updateUptimeLabel()
 		}()
@@ -955,22 +1247,28 @@ func main() {
 	win.OnClose().Bind(func(e *winc.Event) {
 		cmdMutex.Lock()
 		cmd := currentCmd
-		if currentCancel != nil {
-			currentCancel()
-		}
+		cancel := currentCancel
 		cmdMutex.Unlock()
 
+		// Kumpulkan semua target
+		targets := map[int]struct{}{}
 		if cmd != nil && cmd.Process != nil {
-			killProcessTree(cmd.Process.Pid)
+			targets[cmd.Process.Pid] = struct{}{}
+		}
+		orphanMutex.Lock()
+		for _, pid := range orphanPIDs {
+			targets[pid] = struct{}{}
+		}
+		orphanMutex.Unlock()
+
+		// Kill loop singkat — jangan biarkan window close sebelum bersih.
+		// Pakai maxRounds lebih kecil supaya close tidak terlalu lama.
+		if len(targets) > 0 {
+			stopAllProcesses(targets, cmd, cancel, &orphanPIDs, &orphanMutex, 8)
 		}
 
-		// Kill orphan juga
-		orphanMutex.Lock()
-		orphans := append([]int{}, orphanPIDs...)
-		orphanMutex.Unlock()
-		for _, pid := range orphans {
-			killProcessTree(pid)
-		}
+		// Tutup Job Object → OS kill semua child yang tersisa.
+		killJobObject()
 
 		scanTicker.Stop()
 		uptimeTicker.Stop()

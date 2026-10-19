@@ -12,3 +12,5 @@ uploaded_datasets
 ragna.log
 agribot.sql
 save_data
+alembic
+alembic.ini

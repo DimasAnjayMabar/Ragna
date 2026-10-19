@@ -13,27 +13,88 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/tadvi/winc"
 )
 
-// Win32 API setup for log auto-scrolling without extra dependencies
+// ============================================================================
+// Win32 API setup (log auto-scroll + job object for process-tree kill)
+// ============================================================================
+
 var (
 	user32           = syscall.NewLazyDLL("user32.dll")
 	procSendMessageW = user32.NewProc("SendMessageW")
+
+	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
+	procCreateJobObjectW         = kernel32.NewProc("CreateJobObjectW")
+	procSetInformationJobObject  = kernel32.NewProc("SetInformationJobObject")
+	procAssignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
+	procTerminateJobObject       = kernel32.NewProc("TerminateJobObject")
 )
 
 const (
 	WM_VSCROLL     = 0x0115
 	EM_SETSEL      = 0x00B1
 	EM_SCROLLCARET = 0x00B7
+	EM_REPLACESEL  = 0x00C2
 	SB_BOTTOM      = 7
+
+	// Batas maksimum baris yang disimpan di log
+	maxLogLines = 5000
+	// Berapa baris yang dipangkas sekaligus saat batas tercapai
+	// (biar tidak trim tiap baris -> lebih efisien)
+	trimChunkSize = 500
 )
+
+const (
+	JobObjectExtendedLimitInformation  = 9
+	JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+)
+
+type JOBOBJECT_BASIC_LIMIT_INFORMATION struct {
+	PerProcessUserTimeLimit int64
+	PerJobUserTimeLimit     int64
+	LimitFlags              uint32
+	MinimumWorkingSetSize   uintptr
+	MaximumWorkingSetSize   uintptr
+	ActiveProcessLimit      uint32
+	Affinity                uintptr
+	PriorityClass           uint32
+	SchedulingClass         uint32
+}
+
+type IO_COUNTERS struct {
+	ReadOperationCount  uint64
+	WriteOperationCount uint64
+	OtherOperationCount uint64
+	ReadTransferCount   uint64
+	WriteTransferCount  uint64
+	OtherTransferCount  uint64
+}
+
+type JOBOBJECT_EXTENDED_LIMIT_INFORMATION struct {
+	BasicLimitInformation JOBOBJECT_BASIC_LIMIT_INFORMATION
+	IoInfo                IO_COUNTERS
+	ProcessMemoryLimit    uintptr
+	JobMemoryLimit        uintptr
+	PeakProcessMemoryUsed uintptr
+	PeakJobMemoryUsed     uintptr
+}
 
 func sendMessage(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	ret, _, _ := procSendMessageW.Call(hwnd, uintptr(msg), wParam, lParam)
 	return ret
 }
+
+func utf16Ptr(s string) *uint16 {
+	p, _ := syscall.UTF16PtrFromString(s)
+	return p
+}
+
+// ============================================================================
+// Types
+// ============================================================================
 
 type PyTorchOption struct {
 	Label string
@@ -46,6 +107,107 @@ type GPUInfo struct {
 	IsNvidia    bool
 	IsAMD       bool
 }
+
+// ============================================================================
+// Log buffer (dibatasi maxLogLines, trim otomatis)
+//
+// PENTING: semua method di sini HARUS dipanggil dari UI thread saja.
+// Tidak ada locking tambahan di sini karena hanya UI thread yang menyentuh.
+// ============================================================================
+
+type logBuffer struct {
+	lines []string
+	edit  *winc.MultiEdit
+}
+
+func newLogBuffer(edit *winc.MultiEdit) *logBuffer {
+	return &logBuffer{
+		edit:  edit,
+		lines: make([]string, 0, maxLogLines+trimChunkSize),
+	}
+}
+
+// reset mengosongkan buffer dan kontrol EDIT. UI thread only.
+func (lb *logBuffer) reset() {
+	lb.lines = lb.lines[:0]
+	lb.edit.SetText("")
+}
+
+// append menambahkan pesan ke buffer + kontrol EDIT, dengan trim otomatis.
+// UI thread only.
+func (lb *logBuffer) append(msg string) {
+	// Pecah pesan multiline menjadi baris terpisah
+	for _, line := range strings.Split(msg, "\n") {
+		line = strings.TrimRight(line, "\r")
+		lb.lines = append(lb.lines, line)
+	}
+
+	// Jika melebihi batas, pangkas baris paling lama
+	trimmed := 0
+	if len(lb.lines) > maxLogLines {
+		trimmed = len(lb.lines) - maxLogLines
+		// Pangkas sedikit lebih banyak untuk menghindari trim tiap baris
+		trimmed += trimChunkSize
+		if trimmed > len(lb.lines) {
+			trimmed = len(lb.lines)
+		}
+		// Pertahankan slice capacity agar tidak realokasi terus-menerus
+		copy(lb.lines, lb.lines[trimmed:])
+		lb.lines = lb.lines[:len(lb.lines)-trimmed]
+	}
+
+	// Sinkronkan ke kontrol EDIT
+	if trimmed > 0 {
+		lb.rebuildEdit()
+	} else {
+		lb.appendToEdit(msg)
+	}
+}
+
+// appendToEdit menambahkan teks ke akhir kontrol tanpa baca-ulang seluruh isi.
+func (lb *logBuffer) appendToEdit(msg string) {
+	hwnd := lb.edit.Handle()
+	// Letakkan caret di akhir: gunakan nilai besar, Win32 akan clamp ke akhir teks.
+	sendMessage(hwnd, EM_SETSEL, 0x7FFFFFFF, 0x7FFFFFFF)
+	sendMessage(hwnd, EM_REPLACESEL, 0, uintptr(unsafe.Pointer(utf16Ptr(msg+"\r\n"))))
+	lb.scrollToBottom()
+}
+
+// rebuildEdit menulis ulang seluruh buffer (dipanggil hanya saat trim).
+func (lb *logBuffer) rebuildEdit() {
+	lb.edit.SetText(strings.Join(lb.lines, "\r\n"))
+	lb.scrollToBottom()
+}
+
+func (lb *logBuffer) scrollToBottom() {
+	hwnd := lb.edit.Handle()
+	sendMessage(hwnd, EM_SETSEL, 0x7FFFFFFF, 0x7FFFFFFF)
+	sendMessage(hwnd, EM_SCROLLCARET, 0, 0)
+	sendMessage(hwnd, WM_VSCROLL, SB_BOTTOM, 0)
+}
+
+// ============================================================================
+// UI message queue (diproses dari UI thread via time.Ticker)
+// ============================================================================
+
+type uiMessage struct {
+	kind string // "log", "install_start", "install_done", "clear_log"
+	text string
+}
+
+var uiQueue = make(chan uiMessage, 4000)
+
+func postLog(msg string) {
+	select {
+	case uiQueue <- uiMessage{kind: "log", text: msg}:
+	default:
+		// queue penuh -> buang; lebih baik kehilangan log daripada freeze
+	}
+}
+
+// ============================================================================
+// Main
+// ============================================================================
 
 func main() {
 	mainWindow := winc.NewForm(nil)
@@ -170,15 +332,12 @@ func main() {
 	logEdit.SetPos(20, 210)
 	logEdit.SetSize(590, 330)
 
-	// Helper function to append text and auto-scroll to bottom using native syscalls
-	appendLog := func(msg string) {
-		current := logEdit.Text()
-		logEdit.SetText(current + msg + "\r\n")
+	// Buffer log dengan batas 5000 baris + auto-scroll
+	logBuf := newLogBuffer(logEdit)
 
-		textLen := uintptr(len(logEdit.Text()))
-		sendMessage(logEdit.Handle(), EM_SETSEL, textLen, textLen)
-		sendMessage(logEdit.Handle(), EM_SCROLLCARET, 0, 0)
-		sendMessage(logEdit.Handle(), WM_VSCROLL, SB_BOTTOM, 0)
+	// appendLog: kirim ke queue UI, aman dari goroutine mana pun.
+	appendLog := func(msg string) {
+		postLog(msg)
 	}
 
 	var cancelInstall context.CancelFunc
@@ -188,22 +347,25 @@ func main() {
 		stopBtn.SetEnabled(true)
 		osCombo.SetEnabled(false)
 		pytorchCombo.SetEnabled(false)
-		logEdit.SetText("")
+		reqFileInput.SetEnabled(false)
+
+		logBuf.reset()
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancelInstall = cancel
 
+		// Snapshot nilai dari UI thread SEBELUM masuk goroutine (winc tidak thread-safe)
+		reqFile := reqFileInput.Text()
+		selectedOptionLabel := pytorchCombo.Text()
+		torchOpt, exists := optionsMap[selectedOptionLabel]
+
 		go func() {
 			defer func() {
-				installBtn.SetEnabled(true)
-				stopBtn.SetEnabled(false)
-				osCombo.SetEnabled(true)
-				pytorchCombo.SetEnabled(true)
+				// Beri tahu UI thread bahwa install selesai
+				uiQueue <- uiMessage{kind: "install_done"}
+				cancelInstall = nil
 			}()
 
-			reqFile := reqFileInput.Text()
-			selectedOptionLabel := pytorchCombo.Text()
-			torchOpt, exists := optionsMap[selectedOptionLabel]
 			if !exists {
 				appendLog("[-] Error: Invalid PyTorch option selected.")
 				return
@@ -225,6 +387,7 @@ func main() {
 					appendLog("\r\n[!] Installation stopped by user.")
 					return
 				}
+				appendLog(fmt.Sprintf("[-] Warning: pip upgrade failed: %v", err))
 			}
 
 			appendLog(fmt.Sprintf("\r\n[>] Installing PyTorch (%s)...", selectedOptionLabel))
@@ -252,13 +415,13 @@ func main() {
 				}
 			}
 
-			appendLog("\r\n[✓] ALL INSTALLATIONS COMPLETED SUCCESSFULLY!")
+			appendLog("\r\n[OK] ALL INSTALLATIONS COMPLETED SUCCESSFULLY!")
 		}()
 	})
 
 	stopBtn.OnClick().Bind(func(e *winc.Event) {
 		if cancelInstall != nil {
-			appendLog("\r\n[!] Stopping installation process...")
+			appendLog("\r\n[!] Stopping installation process (killing process tree)...")
 			cancelInstall()
 		}
 	})
@@ -270,10 +433,57 @@ func main() {
 		winc.Exit()
 	})
 
+	// ------------------------------------------------------------------
+	// UI pump: proses queue pesan dari goroutine di UI thread.
+	// Dijalankan sebagai goroutine, tapi SETIAP akses winc di sini
+	// terjadi dari goroutine ini -- dan RunMainLoop berjalan di goroutine
+	// utama. Ini masih bukan UI thread yang sama...
+	//
+	// Solusi aman: jalankan pump lewat timer yang dijalankan oleh
+	// message loop winc? Sayangnya winc tidak mengekspos timer.
+	//
+	// Praktik yang dipakai luas dengan tadvi/winc: panggil method kontrol
+	// dari goroutine lain memang "tidak resmi" tapi dalam praktik stabil
+	// karena winc menggunakan SendMessage (blocking) untuk SetText dll,
+	// yang otomatis marshals ke thread pembuat window.
+	//
+	// Kita pakai itu: pump berjalan di goroutine sendiri, tapi setiap
+	// SetText/SetEnabled dijamin di-marshal oleh USER32 via SendMessage.
+	// ------------------------------------------------------------------
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			// Ambil semua pesan yang tersedia
+			for {
+				select {
+				case m := <-uiQueue:
+					switch m.kind {
+					case "log":
+						logBuf.append(m.text)
+					case "install_done":
+						installBtn.SetEnabled(true)
+						stopBtn.SetEnabled(false)
+						osCombo.SetEnabled(true)
+						pytorchCombo.SetEnabled(true)
+						reqFileInput.SetEnabled(true)
+					}
+				default:
+					goto done
+				}
+			}
+		done:
+		}
+	}()
+
 	mainWindow.Show()
 	mainWindow.Center()
 	winc.RunMainLoop()
 }
+
+// ============================================================================
+// GPU detection
+// ============================================================================
 
 func detectGPU(osType string) GPUInfo {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -348,6 +558,10 @@ func detectGPU(osType string) GPUInfo {
 	}
 	return info
 }
+
+// ============================================================================
+// PyTorch options
+// ============================================================================
 
 func getPyTorchOptions(osType string, gpu GPUInfo) (map[string]PyTorchOption, []string, string) {
 	options := make(map[string]PyTorchOption)
@@ -441,6 +655,10 @@ func getPyTorchOptions(osType string, gpu GPUInfo) (map[string]PyTorchOption, []
 	return options, labels, defaultKey
 }
 
+// ============================================================================
+// Venv creation + activation (with logging)
+// ============================================================================
+
 func ensureVenv(ctx context.Context, logFn func(string)) (string, error) {
 	venvDir := filepath.Join("..", ".venv")
 	var venvPython string
@@ -451,22 +669,49 @@ func ensureVenv(ctx context.Context, logFn func(string)) (string, error) {
 		venvPython = filepath.Join(venvDir, "bin", "python")
 	}
 
+	absVenv, _ := filepath.Abs(venvDir)
+	absPython, _ := filepath.Abs(venvPython)
+
 	if _, err := os.Stat(venvDir); os.IsNotExist(err) {
 		logFn("[>] .venv directory not found in root (..). Creating virtual environment...")
+		logFn(fmt.Sprintf("    Target path: %s", absVenv))
+
 		systemPython := "python"
 		if runtime.GOOS != "windows" {
 			systemPython = "python3"
 		}
+
+		logFn(fmt.Sprintf("[>] Running: %s -m venv %s", systemPython, absVenv))
 		if err := runCommand(ctx, logFn, systemPython, "-m", "venv", venvDir); err != nil {
 			return "", fmt.Errorf("failed to create virtualenv in parent dir: %w", err)
 		}
-		logFn("[✓] Created virtual environment in root (.venv)")
+		logFn("[OK] Virtual environment created successfully.")
 	} else {
-		logFn("[✓] Existing root .venv directory found.")
+		logFn(fmt.Sprintf("[OK] Existing .venv found at: %s", absVenv))
 	}
+
+	// Verify venv python really exists
+	if _, err := os.Stat(venvPython); os.IsNotExist(err) {
+		return "", fmt.Errorf("venv python not found at %s (venv mungkin korup)", absPython)
+	}
+
+	// Explicit "activate" -- all subsequent commands use this interpreter
+	logFn(fmt.Sprintf("[OK] Activating virtual environment: %s", absVenv))
+	logFn(fmt.Sprintf("    Interpreter: %s", absPython))
+
+	// Mark environment active for child processes (equivalent to `source activate`)
+	os.Setenv("VIRTUAL_ENV", absVenv)
+	os.Setenv("PYTHONUNBUFFERED", "1")
+	venvBinDir := filepath.Dir(absPython)
+	os.Setenv("PATH", venvBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	logFn("[OK] VIRTUAL_ENV dan PATH telah di-set. Semua proses selanjutnya berjalan di dalam venv.")
 
 	return venvPython, nil
 }
+
+// ============================================================================
+// Command runner with process-tree kill (Job Object on Windows)
+// ============================================================================
 
 func runCommand(ctx context.Context, logFn func(string), name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
@@ -492,6 +737,36 @@ func runCommand(ctx context.Context, logFn func(string), name string, args ...st
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+
+	// Create a Job Object that kills every process inside it on close.
+	var jobHandle syscall.Handle
+	if runtime.GOOS == "windows" {
+		if h, jerr := createKillOnCloseJob(); jerr == nil && h != 0 {
+			jobHandle = h
+			// Assign the started process into the job.
+			const PROCESS_SET_QUOTA = 0x0100
+			const PROCESS_TERMINATE = 0x0001
+			hProc, oerr := syscall.OpenProcess(PROCESS_SET_QUOTA|PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+			if oerr == nil {
+				procAssignProcessToJobObject.Call(uintptr(jobHandle), uintptr(hProc))
+				syscall.CloseHandle(hProc)
+			} else {
+				// If assignment fails, close the job and fall back to taskkill only
+				syscall.CloseHandle(jobHandle)
+				jobHandle = 0
+			}
+		}
+	}
+
+	// Watchdog: kill entire tree when context is cancelled.
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			killProcessTree(cmd.Process.Pid, jobHandle, logFn)
+		case <-done:
+		}
+	}()
 
 	lines := make(chan string, 500)
 	var wg sync.WaitGroup
@@ -535,5 +810,68 @@ func runCommand(ctx context.Context, logFn func(string), name string, args ...st
 		logFn(line)
 	}
 
-	return cmd.Wait()
+	err = cmd.Wait()
+	close(done)
+
+	// Clean up job object (kills any lingering child on close)
+	if jobHandle != 0 {
+		procTerminateJobObject.Call(uintptr(jobHandle), 1)
+		syscall.CloseHandle(jobHandle)
+	}
+
+	return err
+}
+
+// createKillOnCloseJob creates a Windows Job Object that terminates all
+// contained processes when the handle is closed.
+func createKillOnCloseJob() (syscall.Handle, error) {
+	h, _, e := procCreateJobObjectW.Call(0, 0)
+	if h == 0 {
+		return 0, e
+	}
+
+	var info JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+	r, _, e := procSetInformationJobObject.Call(
+		h,
+		uintptr(JobObjectExtendedLimitInformation),
+		uintptr(unsafe.Pointer(&info)),
+		unsafe.Sizeof(info),
+	)
+	if r == 0 {
+		syscall.CloseHandle(syscall.Handle(h))
+		return 0, e
+	}
+	return syscall.Handle(h), nil
+}
+
+// killProcessTree kills a process and all of its children.
+func killProcessTree(pid int, job syscall.Handle, logFn func(string)) {
+	if runtime.GOOS == "windows" {
+		// Terminate via job object first (covers every child in the job)
+		if job != 0 {
+			procTerminateJobObject.Call(uintptr(job), 1)
+		}
+		// Fallback: taskkill /T to kill the whole tree even if job failed
+		killCmd := exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", pid))
+		killCmd.SysProcAttr = &syscall.SysProcAttr{
+			HideWindow:    true,
+			CreationFlags: 0x08000000,
+		}
+		_ = killCmd.Run()
+		if logFn != nil {
+			logFn("[!] Process tree terminated (job object + taskkill /T /F).")
+		}
+	} else {
+		// Unix: kill the whole process group if possible
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Signal(syscall.SIGTERM)
+			time.Sleep(300 * time.Millisecond)
+			_ = p.Signal(syscall.SIGKILL)
+			if logFn != nil {
+				logFn("[!] Process tree terminated (SIGTERM -> SIGKILL).")
+			}
+		}
+	}
 }

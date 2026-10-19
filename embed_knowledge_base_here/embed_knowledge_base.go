@@ -1,3 +1,5 @@
+//go:build windows
+
 package main
 
 import (
@@ -10,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -20,7 +21,8 @@ import (
 	"github.com/tadvi/winc"
 )
 
-// Win32 API setup
+// ==================== WIN32 API ====================
+
 var (
 	user32                    = syscall.NewLazyDLL("user32.dll")
 	procSendMessageW          = user32.NewProc("SendMessageW")
@@ -29,15 +31,15 @@ var (
 )
 
 const (
-	WM_VSCROLL     = 0x0115
-	EM_SETSEL      = 0x00B1
-	EM_REPLACESEL  = 0x00C2
-	EM_SCROLLCARET = 0x00B7
-	SB_BOTTOM      = 7
+	WM_VSCROLL      = 0x0115
+	EM_SETSEL       = 0x00B1
+	EM_REPLACESEL   = 0x00C2
+	EM_SCROLLCARET  = 0x00B7
+	EM_SETLIMITTEXT = 0x00C5
+	SB_BOTTOM       = 7
 	SPI_GETWORKAREA = 0x0030
 )
 
-// RECT struct untuk Win32 SystemParametersInfo
 type RECT struct {
 	Left   int32
 	Top    int32
@@ -45,7 +47,6 @@ type RECT struct {
 	Bottom int32
 }
 
-// getScreenWorkArea mengembalikan ukuran working area layar (tanpa taskbar).
 func getScreenWorkArea() (width, height int) {
 	var rect RECT
 	procSystemParametersInfoW.Call(
@@ -57,7 +58,6 @@ func getScreenWorkArea() (width, height int) {
 	w := int(rect.Right - rect.Left)
 	h := int(rect.Bottom - rect.Top)
 	if w <= 0 || h <= 0 {
-		// Fallback jika gagal
 		w = 1280
 		h = 720
 	}
@@ -85,6 +85,10 @@ const (
 	instructionFileName = "instruction_set.md"
 	guardRailsFileName  = "guard_rails.md"
 	maxLangButtons      = 6
+
+	// [LOG-BUFFER] batas log
+	maxLogLines = 5000
+	maxLogChars = 200_000
 )
 
 var (
@@ -100,37 +104,196 @@ var (
 	defaultInstructionLangs = []string{"id", "en"}
 )
 
+// ==================== [LOG-BUFFER] STATE & HELPERS ====================
+
+var (
+	logMu      sync.Mutex
+	logLines   = make([]string, 0, maxLogLines) // ring buffer
+	logPending = make([]string, 0, 256)         // antrian belum di-flush
+)
+
+// rebuildLogEdit menulis ulang seluruh isi kontrol dari ring buffer.
+// WAJIB dipanggil dari UI thread.
+func rebuildLogEdit(edit *winc.MultiEdit) {
+	logMu.Lock()
+	lines := make([]string, len(logLines))
+	copy(lines, logLines)
+	logMu.Unlock()
+
+	text := strings.Join(lines, "\r\n")
+	if len(text) > maxLogChars {
+		cut := len(text) - maxLogChars
+		text = text[cut:]
+		if i := strings.Index(text, "\r\n"); i >= 0 {
+			text = text[i+2:]
+		}
+	}
+
+	edit.SetText(text)
+	sendMessage(edit.Handle(), EM_SETSEL, ^uintptr(0), ^uintptr(0))
+	sendMessage(edit.Handle(), EM_SCROLLCARET, 0, 0)
+	sendMessage(edit.Handle(), WM_VSCROLL, SB_BOTTOM, 0)
+}
+
+// appendBatchToEdit menambahkan batch baris ke kontrol secara incremental.
+// WAJIB dipanggil dari UI thread.
+func appendBatchToEdit(edit *winc.MultiEdit, batch []string) {
+	if len(batch) == 0 {
+		return
+	}
+	text := strings.Join(batch, "\r\n") + "\r\n"
+
+	curLen := len(edit.Text())
+	if curLen+len(text) > maxLogChars {
+		rebuildLogEdit(edit)
+		return
+	}
+
+	ptr, err := syscall.UTF16PtrFromString(text)
+	if err != nil {
+		return
+	}
+	sendMessage(edit.Handle(), EM_SETSEL, ^uintptr(0), ^uintptr(0))
+	sendMessage(edit.Handle(), EM_REPLACESEL, 0, uintptr(unsafe.Pointer(ptr)))
+	sendMessage(edit.Handle(), EM_SCROLLCARET, 0, 0)
+	sendMessage(edit.Handle(), WM_VSCROLL, SB_BOTTOM, 0)
+}
+
+// flushLogs memindahkan logPending ke ring buffer dan menampilkannya.
+// WAJIB dipanggil dari UI thread.
+func flushLogs(edit *winc.MultiEdit) {
+	logMu.Lock()
+	if len(logPending) == 0 {
+		logMu.Unlock()
+		return
+	}
+	batch := logPending
+	logPending = nil
+	logMu.Unlock()
+
+	logMu.Lock()
+	logLines = append(logLines, batch...)
+	dropped := 0
+	if len(logLines) > maxLogLines {
+		dropped = len(logLines) - maxLogLines
+		copy(logLines, logLines[dropped:])
+		for i := maxLogLines; i < len(logLines); i++ {
+			logLines[i] = ""
+		}
+		logLines = logLines[:maxLogLines]
+	}
+	logMu.Unlock()
+
+	if dropped > 0 {
+		rebuildLogEdit(edit)
+		return
+	}
+	appendBatchToEdit(edit, batch)
+}
+
+// enqueueLog memasukkan pesan ke antrian (goroutine-safe).
+func enqueueLog(msg string) {
+	if msg == "" {
+		return
+	}
+	normalized := strings.ReplaceAll(msg, "\r\n", "\n")
+	for _, line := range strings.Split(normalized, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		logMu.Lock()
+		logPending = append(logPending, line)
+		logMu.Unlock()
+	}
+}
+
+// clearLogBuffers mengosongkan antrian + ring buffer.
+func clearLogBuffers() {
+	logMu.Lock()
+	logPending = logPending[:0]
+	logLines = logLines[:0]
+	logMu.Unlock()
+}
+
+// ==================== NEO4J CHECK SCRIPT ====================
+
+const neo4jCheckScript = `
+import os, sys
+from pathlib import Path
+
+def load_dotenv():
+    here = Path.cwd()
+    for base in [here, here.parent, here.parent.parent]:
+        envfile = base / ".env"
+        if envfile.is_file():
+            print("neo4j: loading %s" % envfile)
+            for raw in envfile.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                os.environ.setdefault(k, v)
+            return envfile
+    return None
+
+found = load_dotenv()
+if not found:
+    print("neo4j FAIL: .env not found (cwd=%s)" % os.getcwd())
+    sys.exit(1)
+
+try:
+    from neo4j import GraphDatabase
+    uri  = os.environ.get("NEO4J_URI", "")
+    user = os.environ.get("NEO4J_USER", "") or os.environ.get("NEO4J_USERNAME", "")
+    pw   = os.environ.get("NEO4J_PASS", "") or os.environ.get("NEO4J_PASSWORD", "")
+    if not uri or not user or not pw:
+        print("neo4j FAIL: NEO4J_URI / NEO4J_USER / NEO4J_PASS not set")
+        sys.exit(1)
+    drv = GraphDatabase.driver(uri, auth=(user, pw), connection_timeout=3)
+    drv.verify_connectivity()
+    with drv.session() as s:
+        s.run("RETURN 1").consume()
+    drv.close()
+    print("neo4j OK: %s" % uri)
+except Exception as e:
+    print("neo4j FAIL: %s" % e)
+    sys.exit(1)
+`
+
 // ==================== EDITOR LAYOUT ====================
 
-// EditorLayout menyimpan posisi & ukuran elemen editor.
-// Dihitung dinamis dari lebar/tinggi window.
 type EditorLayout struct {
-	WindowWidth     int
-	WindowHeight    int
+	WindowWidth  int
+	WindowHeight int
 
-	TopBarY         int
-	TopBarH         int
+	TopBarY int
+	TopBarH int
 
-	LangLabelX      int
-	LangLabelW      int
-	LangLabelH      int
+	LangLabelX int
+	LangLabelW int
+	LangLabelH int
 
-	LangBtnStartX   int
-	LangBtnWidth    int
-	LangBtnGap      int
+	LangBtnStartX int
+	LangBtnWidth  int
+	LangBtnGap    int
 
-	InputX          int
-	InputY          int
-	InputW          int
-	InputH          int
+	InputX int
+	InputY int
+	InputW int
+	InputH int
 
-	AddBtnX         int
-	AddBtnW         int
-	AddBtnH         int
+	AddBtnX int
+	AddBtnW int
+	AddBtnH int
 
-	RemoveBtnX      int
-	RemoveBtnW      int
-	RemoveBtnH      int
+	RemoveBtnX int
+	RemoveBtnW int
+	RemoveBtnH int
 
 	SlotStartY      int
 	SlotLabelH      int
@@ -141,33 +304,25 @@ type EditorLayout struct {
 	SlotFieldX      int
 	SlotFieldW      int
 
-	BottomBtnY      int
-	BottomBtnH      int
-	SaveBtnX        int
-	SaveBtnW        int
-	EmbedBtnX       int
-	EmbedBtnW       int
-	CloseBtnX       int
-	CloseBtnW       int
+	BottomBtnY int
+	BottomBtnH int
+	SaveBtnX   int
+	SaveBtnW   int
+	EmbedBtnX  int
+	EmbedBtnW  int
+	CloseBtnX  int
+	CloseBtnW  int
 }
 
-// computeEditorLayout menghitung posisi & ukuran elemen editor
-// berdasarkan ukuran AREA KLIEN window (bukan ukuran luar window).
-//
-// PENTING: winc SetSize() pada Form mengatur ukuran LUAR window
-// (termasuk title bar + border). Jika ukuran itu dipakai sebagai tinggi
-// layout, tombol bawah akan terdorong keluar dari area yang terlihat.
-// Karena itu selalu kirim dlg.ClientWidth() / dlg.ClientHeight().
 func computeEditorLayout(winW, winH int) EditorLayout {
 	const (
 		marginX      = 10
 		marginTop    = 10
 		marginBottom = 10
-		labelHeight  = 20 // tinggi label di atas field
-		minFieldH    = 30 // tinggi minimum area teks per slot
+		labelHeight  = 20
+		minFieldH    = 30
 	)
 
-	// ── Top bar ───────────────────────────────────────────────────────
 	topBarY := marginTop
 	topBarH := 32
 
@@ -179,7 +334,6 @@ func computeEditorLayout(winW, winH int) EditorLayout {
 	langBtnWidth := 55
 	langBtnGap := 4
 
-	// Blok kanan: input(110) + gap(10) + Add(80) + gap(10) + Remove(90)
 	rightBlockW := 110 + 10 + 80 + 10 + 90
 	inputX := winW - marginX - rightBlockW
 	inputY := topBarY + 3
@@ -194,7 +348,6 @@ func computeEditorLayout(winW, winH int) EditorLayout {
 	removeBtnW := 90
 	removeBtnH := 32
 
-	// ── Bottom buttons (selalu menempel di dasar area klien) ──────────
 	bottomBtnH := 32
 	bottomBtnY := winH - marginBottom - bottomBtnH
 
@@ -207,19 +360,14 @@ func computeEditorLayout(winW, winH int) EditorLayout {
 	closeBtnW := 130
 	closeBtnX := winW - marginX - closeBtnW
 
-	// ── Slot fields ───────────────────────────────────────────────────
-	// Mulai di bawah top bar + ruang untuk hint (25px)
 	slotStartY := topBarY + topBarH + 25
 
-	// Ruang tersedia = dari slotStartY sampai sedikit di atas tombol bawah
 	slotAreaBottom := bottomBtnY - 8
 	availableHeight := slotAreaBottom - slotStartY
 
 	numSlots := len(instructionSlots)
 	slotFieldGap := 6
 
-	// Tinggi satu blok slot (label + field), dibagi rata.
-	// Tidak ada batas maksimum: field ikut membesar saat window diperbesar.
 	slotFieldHeight := (availableHeight-slotFieldGap*(numSlots-1))/numSlots
 	if slotFieldHeight < labelHeight+minFieldH {
 		slotFieldHeight = labelHeight + minFieldH
@@ -277,12 +425,11 @@ func computeEditorLayout(winW, winH int) EditorLayout {
 }
 
 func main() {
-	// Dapatkan screen work area
 	screenW, screenH := getScreenWorkArea()
 
 	mainWindow := winc.NewForm(nil)
 	mainWindow.SetSize(screenW, screenH)
-	mainWindow.SetMinSize(1000, 480) // lebar minimum agar semua tombol atas muat
+	mainWindow.SetMinSize(1000, 480)
 	mainWindow.SetText("Knowledge Base & Vector Store Manager")
 
 	workDir, _ := filepath.Abs(".")
@@ -312,6 +459,11 @@ func main() {
 	btnClear.SetSize(180, 32)
 	btnClear.SetText("🧹 Clear Log")
 
+	btnRefreshLog := winc.NewPushButton(mainWindow)
+	btnRefreshLog.SetPos(590, 55)
+	btnRefreshLog.SetSize(180, 32)
+	btnRefreshLog.SetText("🔄 Refresh Log")
+
 	btnEditInstruction := winc.NewPushButton(mainWindow)
 	btnEditInstruction.SetPos(400, 15)
 	btnEditInstruction.SetSize(180, 32)
@@ -330,27 +482,19 @@ func main() {
 
 	logEdit := winc.NewMultiEdit(mainWindow)
 	logEdit.SetPos(20, 100)
-	logEdit.SetSize(screenW-40, screenH-140) // ukuran awal; disesuaikan oleh relayoutMain
+	logEdit.SetSize(screenW-40, screenH-140)
 
+	// [LOG-BUFFER] batasi panjang teks di kontrol Edit
+	sendMessage(logEdit.Handle(), EM_SETLIMITTEXT, 0, maxLogChars)
+
+	// [LOG-BUFFER] appendLog hanya enqueue; flush dilakukan manual di UI thread
 	appendLog := func(msg string) {
-		if msg == "" {
-			return
-		}
-		text := msg + "\r\n"
-		ptr, err := syscall.UTF16PtrFromString(text)
-		if err != nil {
-			return
-		}
-
-		sendMessage(logEdit.Handle(), EM_SETSEL, ^uintptr(0), ^uintptr(0))
-		sendMessage(logEdit.Handle(), EM_REPLACESEL, 0, uintptr(unsafe.Pointer(ptr)))
-		sendMessage(logEdit.Handle(), EM_SCROLLCARET, 0, 0)
-		sendMessage(logEdit.Handle(), WM_VSCROLL, SB_BOTTOM, 0)
+		enqueueLog(msg)
 	}
 
 	allButtons := []*winc.PushButton{
 		btnCheckEnv, btnEmbed, btnDeleteKB, btnDeleteMemory, btnClear,
-		btnEditInstruction, btnEditGuardRails,
+		btnRefreshLog, btnEditInstruction, btnEditGuardRails,
 	}
 
 	setButtonsEnabled := func(enabled bool) {
@@ -414,7 +558,14 @@ func main() {
 	})
 
 	btnClear.OnClick().Bind(func(e *winc.Event) {
+		// [LOG-BUFFER] reset buffer + tampilan
+		clearLogBuffers()
 		logEdit.SetText("")
+	})
+
+	// [LOG-BUFFER] flush manual — tombol ini berjalan di UI thread
+	btnRefreshLog.OnClick().Bind(func(e *winc.Event) {
+		flushLogs(logEdit)
 	})
 
 	btnEditInstruction.OnClick().Bind(func(e *winc.Event) {
@@ -439,7 +590,6 @@ func main() {
 		winc.Exit()
 	})
 
-	// Log area mengisi sisa ruang klien (di bawah baris tombol) secara dinamis.
 	relayoutMain := func() {
 		cw, ch := mainWindow.ClientWidth(), mainWindow.ClientHeight()
 		if cw <= 0 || ch <= 0 {
@@ -458,8 +608,11 @@ func main() {
 		logEdit.SetPos(margin, logTop)
 		logEdit.SetSize(w, h)
 	}
+
+	// [LOG-BUFFER] flush juga saat window di-resize (event UI thread)
 	mainWindow.OnSize().Bind(func(e *winc.Event) {
 		relayoutMain()
+		flushLogs(logEdit)
 	})
 
 	mainWindow.Show()
@@ -493,10 +646,7 @@ func resolvePythonEnv() PyEnv {
 		return PyEnv{PythonCmd: absPy}
 	}
 
-	if runtime.GOOS == "windows" {
-		return PyEnv{PythonCmd: "python"}
-	}
-	return PyEnv{PythonCmd: "python3"}
+	return PyEnv{PythonCmd: "python"}
 }
 
 func fileExists(path string) bool {
@@ -519,24 +669,167 @@ func checkEnvironment(ctx context.Context, workDir string, logFn func(string)) e
 		logFn("  ❌ Dataset directory NOT found!")
 	}
 
-	checks := []struct {
+	importChecks := []struct {
 		name string
 		args []string
 	}{
 		{"Python Version", []string{"--version"}},
 		{"ChromaDB", []string{"-c", "import chromadb; print('ChromaDB OK')"}},
-		{"Neo4j Driver", []string{"-c", "import neo4j; print('Neo4j Driver OK')"}},
 		{"pdfplumber", []string{"-c", "import pdfplumber; print('pdfplumber OK')"}},
 	}
 
-	for _, c := range checks {
+	for _, c := range importChecks {
 		logFn(fmt.Sprintf("\n[check] Checking %s...", c.name))
 		if err := runCommand(ctx, logFn, workDir, env.PythonCmd, c.args...); err != nil {
 			logFn(fmt.Sprintf("  ❌ %s unavailable", c.name))
 		}
 	}
 
+	logFn("\n[check] Checking Neo4j connectivity...")
+
+	neo4jCheckFile := filepath.Join(workDir, "_neo4j_check.py")
+	if err := os.WriteFile(neo4jCheckFile, []byte(neo4jCheckScript), 0644); err != nil {
+		logFn(fmt.Sprintf("  ❌ Cannot write Neo4j check script: %v", err))
+		return nil
+	}
+	defer os.Remove(neo4jCheckFile)
+
+	if err := runCommand(ctx, logFn, workDir, env.PythonCmd, neo4jCheckFile); err != nil {
+		logFn("  ❌ Neo4j NOT reachable (lihat pesan di atas).")
+	} else {
+		logFn("  ✅ Neo4j reachable.")
+	}
+
 	return nil
+}
+
+// ==================== PROCESS TREE (WINDOWS JOB OBJECT) ====================
+
+type procTree struct {
+	cmd       *exec.Cmd
+	jobHandle syscall.Handle
+}
+
+const (
+	processSetQuota  = 0x0100
+	processTerminate = 0x0001
+
+	jobObjectExtendedLimitInformation = 9
+	jobObjectLimitKillOnJobClose      = 0x2000
+)
+
+type jobObjectBasicLimitInformation struct {
+	PerProcessUserTimeLimit int64
+	PerJobUserTimeLimit     int64
+	LimitFlags              uint32
+	MinimumWorkingSetSize   uintptr
+	MaximumWorkingSetSize   uintptr
+	ActiveProcessLimit      uint32
+	Affinity                uintptr
+	PriorityClass           uint32
+	SchedulingClass         uint32
+}
+
+type ioCounters struct {
+	ReadOperationCount  uint64
+	WriteOperationCount uint64
+	OtherOperationCount uint64
+	ReadTransferCount   uint64
+	WriteTransferCount  uint64
+	OtherTransferCount  uint64
+}
+
+type jobObjectExtendedLimitInformationStruct struct {
+	BasicLimitInformation jobObjectBasicLimitInformation
+	IoInfo                ioCounters
+	ProcessMemoryLimit    uintptr
+	JobMemoryLimit        uintptr
+	PeakProcessMemoryUsed uintptr
+	PeakJobMemoryUsed     uintptr
+}
+
+var (
+	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
+	procCreateJobObjectW         = kernel32.NewProc("CreateJobObjectW")
+	procSetInformationJobObject  = kernel32.NewProc("SetInformationJobObject")
+	procAssignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
+	procTerminateJobObject       = kernel32.NewProc("TerminateJobObject")
+	procCloseHandleK32           = kernel32.NewProc("CloseHandle")
+)
+
+func startInJobObject(cmd *exec.Cmd) (*procTree, error) {
+	hJob, _, err := procCreateJobObjectW.Call(0, 0)
+	if hJob == 0 {
+		return nil, fmt.Errorf("CreateJobObjectW: %v", err)
+	}
+
+	info := jobObjectExtendedLimitInformationStruct{}
+	info.BasicLimitInformation.LimitFlags = jobObjectLimitKillOnJobClose
+
+	ret, _, err := procSetInformationJobObject.Call(
+		hJob,
+		uintptr(jobObjectExtendedLimitInformation),
+		uintptr(unsafe.Pointer(&info)),
+		unsafe.Sizeof(info),
+	)
+	if ret == 0 {
+		procCloseHandleK32.Call(hJob)
+		return nil, fmt.Errorf("SetInformationJobObject: %v", err)
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+	}
+
+	if err := cmd.Start(); err != nil {
+		procCloseHandleK32.Call(hJob)
+		return nil, err
+	}
+
+	hProc, err := syscall.OpenProcess(
+		processSetQuota|processTerminate,
+		false,
+		uint32(cmd.Process.Pid),
+	)
+	if err != nil {
+		procCloseHandleK32.Call(hJob)
+		_ = cmd.Process.Kill()
+		return nil, fmt.Errorf("OpenProcess: %w", err)
+	}
+	defer syscall.CloseHandle(hProc)
+
+	ret, _, err = procAssignProcessToJobObject.Call(
+		hJob,
+		uintptr(hProc),
+	)
+	if ret == 0 {
+		procCloseHandleK32.Call(hJob)
+		_ = cmd.Process.Kill()
+		return nil, fmt.Errorf("AssignProcessToJobObject: %v", err)
+	}
+
+	return &procTree{cmd: cmd, jobHandle: syscall.Handle(hJob)}, nil
+}
+
+func (pt *procTree) Kill() {
+	if pt == nil || pt.cmd == nil || pt.cmd.Process == nil {
+		return
+	}
+	if pt.jobHandle != 0 {
+		procTerminateJobObject.Call(uintptr(pt.jobHandle), 1)
+		procCloseHandleK32.Call(uintptr(pt.jobHandle))
+		pt.jobHandle = 0
+	} else {
+		_ = pt.cmd.Process.Kill()
+	}
+}
+
+func (pt *procTree) Close() {
+	if pt != nil && pt.jobHandle != 0 {
+		procCloseHandleK32.Call(uintptr(pt.jobHandle))
+		pt.jobHandle = 0
+	}
 }
 
 // ==================== STREAMING EXEC COMMAND ====================
@@ -575,14 +868,9 @@ func streamPipe(r io.Reader, logFn func(string)) {
 }
 
 func runCommand(ctx context.Context, logFn func(string), workDir, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.Command(name, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
-	}
-
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
-		CreationFlags: 0x08000000,
 	}
 
 	cmd.Env = append(os.Environ(),
@@ -599,25 +887,35 @@ func runCommand(ctx context.Context, logFn func(string), workDir, name string, a
 		return err
 	}
 
-	if err := cmd.Start(); err != nil {
+	pt, err := startInJobObject(cmd)
+	if err != nil {
 		return err
 	}
 
+	killDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			logFn("\r\n[!] Killing process tree...")
+			pt.Kill()
+		case <-killDone:
+		}
+	}()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		streamPipe(stdout, logFn)
-	}()
-
-	go func() {
-		defer wg.Done()
-		streamPipe(stderr, logFn)
-	}()
-
+	go func() { defer wg.Done(); streamPipe(stdout, logFn) }()
+	go func() { defer wg.Done(); streamPipe(stderr, logFn) }()
 	wg.Wait()
-	return cmd.Wait()
+
+	err = cmd.Wait()
+	close(killDone)
+	pt.Close()
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 // ==================== SHARED HELPERS ====================
@@ -794,15 +1092,12 @@ func writeInstructionFile(path string, data map[string]map[string]string) error 
 
 // ==================== EMBED COMMAND (SHARED) ====================
 
-// runPromptGuard menjalankan prompt_guard.py dengan KEDUA file.
-// Ini adalah SATU-SATUNYA fungsi yang dipakai oleh Save & Embed
-// di kedua editor — memastikan konsistensi.
-func runPromptGuard(logFn func(string), workDir string) error {
+func runPromptGuard(ctx context.Context, logFn func(string), workDir string) error {
 	env := resolvePythonEnv()
 	logFn("▶️  Running prompt_guard.py (instruction + guard rails)...")
 	logFn("   (prompt_guard.py selalu membaca KEDUA file sekaligus)")
 
-	err := runCommand(context.Background(), logFn, workDir,
+	err := runCommand(ctx, logFn, workDir,
 		env.PythonCmd, "prompt_guard.py",
 		"--instruction-file", instructionFileName,
 		"--guard-rails-file", guardRailsFileName,
@@ -823,10 +1118,9 @@ func showInstructionEditor(parent *winc.Form, workDir string, logFn func(string)
 	dlg := winc.NewForm(parent)
 	dlg.SetText("Instruction Set Editor")
 	dlg.SetSize(screenW, screenH)
-	dlg.SetMinSize(800, 520) // cegah window terlalu kecil sehingga tombol bawah tertutup
+	dlg.SetMinSize(800, 520)
 	dlg.Center()
 
-	// Layout dihitung dari ukuran AREA KLIEN (bukan ukuran luar window)
 	layout := computeEditorLayout(dlg.ClientWidth(), dlg.ClientHeight())
 
 	filePath := filepath.Join(workDir, instructionFileName)
@@ -841,7 +1135,6 @@ func showInstructionEditor(parent *winc.Form, workDir string, logFn func(string)
 	langList := buildLangList(existing)
 	currentLang := langList[0]
 
-	// ── BARIS 1: Language selector ────────────────────────────────────
 	lblLangBar := winc.NewLabel(dlg)
 	lblLangBar.SetText("Languages:")
 	lblLangBar.SetPos(layout.LangLabelX, layout.TopBarY+5)
@@ -879,7 +1172,6 @@ func showInstructionEditor(parent *winc.Form, workDir string, logFn func(string)
 	btnRemoveLang.SetPos(layout.RemoveBtnX, layout.TopBarY)
 	btnRemoveLang.SetSize(layout.RemoveBtnW, layout.RemoveBtnH)
 
-	// ── SLOT FIELDS ───────────────────────────────────────────────────
 	fields := make(map[string]*winc.MultiEdit)
 	slotLabels := make([]*winc.Label, 0, len(instructionSlots))
 	for i, slot := range instructionSlots {
@@ -898,7 +1190,6 @@ func showInstructionEditor(parent *winc.Form, workDir string, logFn func(string)
 		fields[slot] = me
 	}
 
-	// ── Helpers ───────────────────────────────────────────────────────
 	collectCurrentFields := func() map[string]string {
 		out := make(map[string]string)
 		for _, slot := range instructionSlots {
@@ -1033,7 +1324,6 @@ func showInstructionEditor(parent *winc.Form, workDir string, logFn func(string)
 	loadLangIntoFields(currentLang)
 	refreshLangButtons()
 
-	// ── TOMBOL BAWAH ──────────────────────────────────────────────────
 	btnSave := winc.NewPushButton(dlg)
 	btnSave.SetText("💾 Save to instruction_set.md")
 	btnSave.SetPos(layout.SaveBtnX, layout.BottomBtnY)
@@ -1052,7 +1342,6 @@ func showInstructionEditor(parent *winc.Form, workDir string, logFn func(string)
 	btnEmbed.SetPos(layout.EmbedBtnX, layout.BottomBtnY)
 	btnEmbed.SetSize(layout.EmbedBtnW, layout.BottomBtnH)
 	btnEmbed.OnClick().Bind(func(e *winc.Event) {
-		// 1) Simpan instruction_set.md dari field yang aktif
 		saveCurrentLangFields()
 		if err := writeInstructionFile(filePath, existing); err != nil {
 			logFn(fmt.Sprintf("❌ Gagal menyimpan instruction: %v", err))
@@ -1060,10 +1349,7 @@ func showInstructionEditor(parent *winc.Form, workDir string, logFn func(string)
 		}
 		logFn(fmt.Sprintf("✅ Instruction saved to %s", instructionFileName))
 
-		// 2) Jalankan prompt_guard.py — baca KEDUA file
-		// (guard_rails.md diambil dari file yang ada di disk, TIDAK dari editor ini)
-		go runPromptGuard(logFn, workDir)
-
+		go runPromptGuard(context.Background(), logFn, workDir)
 		dlg.Close()
 	})
 
@@ -1075,16 +1361,13 @@ func showInstructionEditor(parent *winc.Form, workDir string, logFn func(string)
 		dlg.Close()
 	})
 
-	// ── RELAYOUT DINAMIS ──────────────────────────────────────────────
-	// Dipanggil saat window di-resize / di-maximize / pertama kali tampil.
 	relayout := func() {
 		cw, ch := dlg.ClientWidth(), dlg.ClientHeight()
 		if cw <= 0 || ch <= 0 {
-			return // window sedang di-minimize
+			return
 		}
 		layout = computeEditorLayout(cw, ch)
 
-		// Top bar
 		lblLangBar.SetPos(layout.LangLabelX, layout.TopBarY+5)
 		lblLangBar.SetSize(layout.LangLabelW, layout.LangLabelH)
 		langInput.SetPos(layout.InputX, layout.InputY)
@@ -1095,9 +1378,8 @@ func showInstructionEditor(parent *winc.Form, workDir string, logFn func(string)
 		btnAddLang.SetSize(layout.AddBtnW, layout.AddBtnH)
 		btnRemoveLang.SetPos(layout.RemoveBtnX, layout.TopBarY)
 		btnRemoveLang.SetSize(layout.RemoveBtnW, layout.RemoveBtnH)
-		refreshLangButtons() // posisi tombol bahasa memakai `layout` terbaru
+		refreshLangButtons()
 
-		// Slot fields
 		for i, slot := range instructionSlots {
 			y := layout.SlotStartY + i*(layout.SlotFieldHeight+layout.SlotFieldGap)
 			slotLabels[i].SetPos(layout.SlotLabelX, y)
@@ -1106,7 +1388,6 @@ func showInstructionEditor(parent *winc.Form, workDir string, logFn func(string)
 			fields[slot].SetSize(layout.SlotFieldW, layout.SlotFieldHeight-layout.SlotLabelH)
 		}
 
-		// Tombol bawah (selalu menempel di dasar area klien)
 		btnSave.SetPos(layout.SaveBtnX, layout.BottomBtnY)
 		btnSave.SetSize(layout.SaveBtnW, layout.BottomBtnH)
 		btnEmbed.SetPos(layout.EmbedBtnX, layout.BottomBtnY)
@@ -1236,7 +1517,7 @@ func showGuardRailsEditor(parent *winc.Form, workDir string, logFn func(string))
 	dlg := winc.NewForm(parent)
 	dlg.SetText("Guard Rails Editor — Forbidden Patterns")
 	dlg.SetSize(screenW, screenH)
-	dlg.SetMinSize(800, 520) // cegah window terlalu kecil sehingga tombol bawah tertutup
+	dlg.SetMinSize(800, 520)
 	dlg.Center()
 
 	layout := computeEditorLayout(dlg.ClientWidth(), dlg.ClientHeight())
@@ -1456,7 +1737,6 @@ func showGuardRailsEditor(parent *winc.Form, workDir string, logFn func(string))
 	loadLangIntoFields(currentLang)
 	refreshLangButtons()
 
-	// ── TOMBOL BAWAH ──────────────────────────────────────────────────
 	btnSave := winc.NewPushButton(dlg)
 	btnSave.SetText("💾 Save to guard_rails.md")
 	btnSave.SetPos(layout.SaveBtnX, layout.BottomBtnY)
@@ -1475,7 +1755,6 @@ func showGuardRailsEditor(parent *winc.Form, workDir string, logFn func(string))
 	btnEmbed.SetPos(layout.EmbedBtnX, layout.BottomBtnY)
 	btnEmbed.SetSize(layout.EmbedBtnW, layout.BottomBtnH)
 	btnEmbed.OnClick().Bind(func(e *winc.Event) {
-		// 1) Simpan guard_rails.md dari field yang aktif
 		saveCurrentLangFields()
 		if err := writeGuardRailsFile(filePath, existing); err != nil {
 			logFn(fmt.Sprintf("❌ Gagal menyimpan guard rails: %v", err))
@@ -1483,10 +1762,7 @@ func showGuardRailsEditor(parent *winc.Form, workDir string, logFn func(string))
 		}
 		logFn(fmt.Sprintf("✅ Guard rails saved to %s", guardRailsFileName))
 
-		// 2) Jalankan prompt_guard.py — baca KEDUA file
-		// (instruction_set.md diambil dari file yang ada di disk)
-		go runPromptGuard(logFn, workDir)
-
+		go runPromptGuard(context.Background(), logFn, workDir)
 		dlg.Close()
 	})
 
@@ -1498,16 +1774,13 @@ func showGuardRailsEditor(parent *winc.Form, workDir string, logFn func(string))
 		dlg.Close()
 	})
 
-	// ── RELAYOUT DINAMIS ──────────────────────────────────────────────
-	// Dipanggil saat window di-resize / di-maximize / pertama kali tampil.
 	relayout := func() {
 		cw, ch := dlg.ClientWidth(), dlg.ClientHeight()
 		if cw <= 0 || ch <= 0 {
-			return // window sedang di-minimize
+			return
 		}
 		layout = computeEditorLayout(cw, ch)
 
-		// Top bar
 		lblLangBar.SetPos(layout.LangLabelX, layout.TopBarY+5)
 		lblLangBar.SetSize(layout.LangLabelW, layout.LangLabelH)
 		langInput.SetPos(layout.InputX, layout.InputY)
@@ -1518,9 +1791,8 @@ func showGuardRailsEditor(parent *winc.Form, workDir string, logFn func(string))
 		btnAddLang.SetSize(layout.AddBtnW, layout.AddBtnH)
 		btnRemoveLang.SetPos(layout.RemoveBtnX, layout.TopBarY)
 		btnRemoveLang.SetSize(layout.RemoveBtnW, layout.RemoveBtnH)
-		refreshLangButtons() // posisi tombol bahasa memakai `layout` terbaru
+		refreshLangButtons()
 
-		// Slot fields
 		for i, slot := range instructionSlots {
 			y := layout.SlotStartY + i*(layout.SlotFieldHeight+layout.SlotFieldGap)
 			slotLabels[i].SetPos(layout.SlotLabelX, y)
@@ -1529,7 +1801,6 @@ func showGuardRailsEditor(parent *winc.Form, workDir string, logFn func(string))
 			fields[slot].SetSize(layout.SlotFieldW, layout.SlotFieldHeight-layout.SlotLabelH)
 		}
 
-		// Tombol bawah (selalu menempel di dasar area klien)
 		btnSave.SetPos(layout.SaveBtnX, layout.BottomBtnY)
 		btnSave.SetSize(layout.SaveBtnW, layout.BottomBtnH)
 		btnEmbed.SetPos(layout.EmbedBtnX, layout.BottomBtnY)

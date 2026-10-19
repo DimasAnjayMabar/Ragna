@@ -14,27 +14,102 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-
 # Resolve root project directory
 PARENT_DIR = Path(__file__).resolve().parent.parent
 if str(PARENT_DIR) not in sys.path:
     sys.path.insert(0, str(PARENT_DIR))
 
-from config import CONFIG
 from neo4j import GraphDatabase
 
-if load_dotenv:
-    root_env_path = PARENT_DIR / ".env"
-    if root_env_path.exists():
-        load_dotenv(dotenv_path=root_env_path)
-    else:
-        load_dotenv()
-
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# ENV LOADER (multi-location .env — mirrors the Go launcher)
+# =============================================================================
+
+def _load_env_files() -> Optional[Path]:
+    """
+    Cari .env di beberapa lokasi (cwd, parent, grandparent, PARENT_DIR).
+    Tidak override env yang sudah ada (os.environ.setdefault).
+    Return path .env yang ditemukan, atau None.
+    """
+    candidates: List[Path] = []
+    try:
+        cwd = Path.cwd()
+        candidates += [cwd, cwd.parent, cwd.parent.parent]
+    except Exception:
+        pass
+    candidates.append(PARENT_DIR)
+
+    seen: set = set()
+    for base in candidates:
+        try:
+            envfile = (base / ".env").resolve()
+        except Exception:
+            continue
+        if envfile in seen:
+            continue
+        seen.add(envfile)
+        if envfile.is_file():
+            logger.info("[env] loading %s", envfile)
+            try:
+                for raw in envfile.read_text(encoding="utf-8").splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    # Do not override env yang sudah ada.
+                    os.environ.setdefault(k, v)
+            except Exception as e:
+                logger.warning("[env] failed to read %s: %s", envfile, e)
+                continue
+            return envfile
+    return None
+
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+_env_found = _load_env_files()
+if _env_found is None and load_dotenv:
+    # Last resort: let python-dotenv search from cwd.
+    try:
+        load_dotenv(override=False)
+    except Exception:
+        pass
+
+
+# =============================================================================
+# NEO4J SETTINGS FROM ENV (aliases supported)
+# =============================================================================
+NEO4J_URI  = os.getenv("NEO4J_URI", "")
+NEO4J_USER = os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME", "")
+NEO4J_PASS = os.getenv("NEO4J_PASS") or os.getenv("NEO4J_PASSWORD", "")
+
+
+def _require_neo4j_env() -> None:
+    """Raise a clear error if any Neo4j env var is missing."""
+    missing = [
+        name
+        for name, value in (
+            ("NEO4J_URI", NEO4J_URI),
+            ("NEO4J_USER (or NEO4J_USERNAME)", NEO4J_USER),
+            ("NEO4J_PASS (or NEO4J_PASSWORD)", NEO4J_PASS),
+        )
+        if not value
+    ]
+    if missing:
+        raise EnvironmentError(
+            "Neo4j environment variables missing: "
+            + ", ".join(missing)
+            + ". Add them to .env (NEO4J_URI, NEO4J_USER, NEO4J_PASS)."
+        )
+
 
 # =============================================================================
 # CONSTANTS
@@ -55,7 +130,7 @@ SLOT_RISK_LEVEL = {
     "bot_identity":            "high",
     "social_guard_rail":       "high",
     "knowledge_guard_rail":    "high",
-    "product_guard_rail": "high",
+    "product_guard_rail":      "high",
     "memory_block_guard_rail": "medium",
     "memory_summary_block":    "low",
 }
@@ -71,9 +146,9 @@ FALLBACK_FORBIDDEN_PATTERNS: Dict[str, List[str]] = {
     "memory_summary_block":    [r"system\s*:"],
 }
 
-DEFAULT_INSTRUCTION_FILE = "instruction_set.md"
-DEFAULT_GUARD_RAILS_FILE = "guard_rails.md"
-DEFAULT_VERSION = "v1"
+DEFAULT_INSTRUCTION_FILE  = "instruction_set.md"
+DEFAULT_GUARD_RAILS_FILE  = "guard_rails.md"
+DEFAULT_VERSION           = "v1"
 
 
 # =============================================================================
@@ -271,15 +346,24 @@ class InstructionIngestor:
       - MERGE by deterministic id → tidak buat node duplikat
       - Compare content_hash → skip jika konten tidak berubah
       - Log ringkasan: created / updated / skipped
+
+    Credentials:
+      - Default dari env (NEO4J_URI / NEO4J_USER / NEO4J_PASS).
+      - Dapat di-override via argumen (mis. dari CLI).
+      - TIDAK ada fallback hard-coded (localhost / 'password').
     """
 
     def __init__(self, uri: str = None, user: str = None, password: str = None):
-        self.uri = uri or CONFIG.get("neo4j_uri", "neo4j://127.0.0.1:7687")
-        self.user = user or CONFIG.get("neo4j_user", "neo4j")
-        self.password = password or CONFIG.get("neo4j_password", "password")
+        self.uri      = uri      or NEO4J_URI
+        self.user     = user     or NEO4J_USER
+        self.password = password or NEO4J_PASS
+
+        if not self.uri or not self.user or not self.password:
+            _require_neo4j_env()
+
         self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
         self.driver.verify_connectivity()
-        print(f"Neo4j connected: {self.uri}")
+        print(f"Neo4j connected: {self.uri} (user={self.user})")
 
     def close(self):
         self.driver.close()
@@ -314,7 +398,7 @@ class InstructionIngestor:
 
         Untuk setiap (lang, slot) di parsed_instructions:
           - text    = parsed_instructions[lang][slot]
-          - patterns = parsed_guard_rails.get(lang, {}).get(slot) 
+          - patterns = parsed_guard_rails.get(lang, {}).get(slot)
                        atau fallback jika tidak ada di guard_rails.md
           - risk     = SLOT_RISK_LEVEL[slot]
         """
@@ -591,9 +675,13 @@ def main():
         default=DEFAULT_VERSION,
         help="Versi instruction set (default: v1)",
     )
-    parser.add_argument("--neo4j-uri", default=None)
-    parser.add_argument("--neo4j-user", default=None)
-    parser.add_argument("--neo4j-password", default=None)
+    parser.add_argument("--neo4j-uri",      default=None)
+    parser.add_argument("--neo4j-user",     default=None)
+    parser.add_argument(
+        "--neo4j-password",
+        default=None,
+        help="Override NEO4J_PASS / NEO4J_PASSWORD dari .env",
+    )
     parser.add_argument("--parse-only", action="store_true")
     parser.add_argument(
         "--force",
@@ -659,6 +747,16 @@ def main():
     if args.parse_only:
         print("\n✅ Parse-only mode — selesai tanpa ingest.")
         return
+
+    # ── Fail-fast Neo4j env check (sama seperti Go launcher) ────────────
+    # Only run if the user has not provided explicit overrides for all
+    # three values on the CLI.
+    if not (args.neo4j_uri and args.neo4j_user and args.neo4j_password):
+        try:
+            _require_neo4j_env()
+        except EnvironmentError as e:
+            print(f"neo4j FAIL: {e}")
+            sys.exit(1)
 
     # ── Ingest ──────────────────────────────────────────────────────────
     print()

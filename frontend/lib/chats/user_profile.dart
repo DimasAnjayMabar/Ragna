@@ -3,6 +3,7 @@ import 'dart:async';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:frontend/chats/batik_theme.dart';
 import 'package:frontend/services/token_storage.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -21,15 +22,15 @@ final _dio = Dio(
 );
 
 // ---------------------------------------------------------------------------
-// Warna & konstanta
+// Warna & konstanta — dipetakan dari palet batik
 // ---------------------------------------------------------------------------
 
-const _bg = Color(0xFF020202);
-const _neon = Color(0xFF16DB65);
-const _neonDim = Color(0x3316DB65);
-const _surface = Color(0xFF0D0D0D);
-const _surfaceAlt = Color(0xFF111111);
-const _textMuted = Color(0xFFA3A3A3);
+const _bg         = BatikColors.kertas;
+const _neon       = BatikColors.marun;   // aksen utama (pengganti neon hijau)
+const _neonDim    = Color(0x268B251E);   // marun 15%
+const _surface    = BatikColors.putih;
+const _surfaceAlt = BatikColors.krem;
+const _textMuted  = BatikColors.abuTeks;
 
 // Interval refresh token — 25 menit agar aman sebelum server expire (30 menit)
 const _kRefreshInterval = Duration(minutes: 25);
@@ -130,14 +131,11 @@ class _UserProfilePageState extends State<UserProfilePage>
     _initAuth();
   }
 
-  /// Baca access token & userId dari token_storage
   Future<void> _initAuth() async {
     try {
       _accessToken = await TokenStorage.read(key: 'access_token');
       _userId = await TokenStorage.getUserId();
-    } catch (_) {
-      // Storage error
-    }
+    } catch (_) {}
 
     if (_accessToken == null || _accessToken!.isEmpty || _userId == null) {
       if (mounted) context.go('/users/login');
@@ -157,14 +155,11 @@ class _UserProfilePageState extends State<UserProfilePage>
 
   // ── Background token refresh ───────────────────────────────────────────────
 
-  /// Jalankan timer periodik setiap [_kRefreshInterval]
   void _startRefreshTimer() {
     _refreshTimer?.cancel();
     _refreshTimer = Timer.periodic(_kRefreshInterval, (_) => _silentRefresh());
   }
 
-  /// Hit POST /users/refresh-token secara silent.
-  /// Menggunakan token_storage untuk baca/tulis token.
   Future<void> _silentRefresh() async {
     final currentRefresh = await TokenStorage.read(key: 'refresh_token');
     if (currentRefresh == null || currentRefresh.isEmpty) {
@@ -183,13 +178,11 @@ class _UserProfilePageState extends State<UserProfilePage>
         final newAccess = data['access_token'] as String;
         final newRefresh = data['refresh_token'] as String;
 
-        // Tulis token baru ke token_storage
         await Future.wait([
           TokenStorage.write(key: 'access_token', value: newAccess),
           TokenStorage.write(key: 'refresh_token', value: newRefresh),
         ]);
 
-        // Update created_at session jika server mengembalikannya
         if (data['created_at'] != null) {
           await TokenStorage.write(
             key: 'session_created_at',
@@ -197,7 +190,6 @@ class _UserProfilePageState extends State<UserProfilePage>
           );
         }
 
-        // Update state
         if (mounted) setState(() => _accessToken = newAccess);
       }
     } on DioException catch (e) {
@@ -205,12 +197,9 @@ class _UserProfilePageState extends State<UserProfilePage>
       if (statusCode == 401 || statusCode == 403) {
         _forceLogout();
       }
-    } catch (_) {
-      // Abaikan error tak terduga
-    }
+    } catch (_) {}
   }
 
-  /// Hapus semua token dari storage dan redirect ke login.
   Future<void> _forceLogout() async {
     _refreshTimer?.cancel();
     await TokenStorage.deleteAll();
@@ -250,13 +239,12 @@ class _UserProfilePageState extends State<UserProfilePage>
       _fadeController.forward(from: 0);
     } on DioException catch (e) {
       String msg = 'Gagal memuat data.';
-      
-      // Cek apakah token expired
+
       if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
         _forceLogout();
         return;
       }
-      
+
       if (e.response?.data['detail'] != null) {
         msg = e.response!.data['detail'].toString();
       }
@@ -286,8 +274,6 @@ class _UserProfilePageState extends State<UserProfilePage>
 
     try {
       await _dio.post('/users/logout', options: Options(headers: _authHeaders));
-      
-      // Hapus semua token dari storage — panggil TokenStorage.deleteAll()
       await TokenStorage.deleteAll();
 
       if (mounted) context.go('/users/login');
@@ -348,10 +334,10 @@ class _UserProfilePageState extends State<UserProfilePage>
     final result = await showDialog<bool>(
       context: context,
       builder: (ctx) => Dialog(
-        backgroundColor: _surface,
+        backgroundColor: BatikColors.putih,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: Color(0xFF1F1F1F)),
+          side: const BorderSide(color: BatikColors.garis),
         ),
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -361,18 +347,18 @@ class _UserProfilePageState extends State<UserProfilePage>
             children: [
               Text(
                 title,
-                style: GoogleFonts.poppins(
-                  fontSize: 16,
+                style: GoogleFonts.playfairDisplay(
+                  fontSize: 17,
                   fontWeight: FontWeight.w700,
-                  color: Colors.white,
+                  color: BatikColors.sogaGelap,
                 ),
               ),
               const SizedBox(height: 10),
               Text(
                 message,
-                style: GoogleFonts.poppins(
+                style: GoogleFonts.nunitoSans(
                   fontSize: 13,
-                  color: _textMuted,
+                  color: BatikColors.abuTeks,
                   height: 1.5,
                 ),
               ),
@@ -383,7 +369,7 @@ class _UserProfilePageState extends State<UserProfilePage>
                     child: OutlinedButton(
                       onPressed: () => Navigator.of(ctx).pop(false),
                       style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: Color(0xFF2A2A2A)),
+                        side: const BorderSide(color: BatikColors.garis),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(10),
                         ),
@@ -391,9 +377,9 @@ class _UserProfilePageState extends State<UserProfilePage>
                       ),
                       child: Text(
                         'Batal',
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 13,
-                          color: _textMuted,
+                          color: BatikColors.abuTeks,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -404,7 +390,7 @@ class _UserProfilePageState extends State<UserProfilePage>
                     child: ElevatedButton(
                       onPressed: () => Navigator.of(ctx).pop(true),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFFF4D4D),
+                        backgroundColor: BatikColors.marun,
                         foregroundColor: Colors.white,
                         elevation: 0,
                         shape: RoundedRectangleBorder(
@@ -414,7 +400,7 @@ class _UserProfilePageState extends State<UserProfilePage>
                       ),
                       child: Text(
                         confirm,
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 13,
                           fontWeight: FontWeight.w600,
                           color: Colors.white,
@@ -435,28 +421,30 @@ class _UserProfilePageState extends State<UserProfilePage>
   // ── Snackbars ─────────────────────────────────────────────────────────────
 
   void _showErrorSnackbar(String message) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(_buildSnackbar(message, const Color(0xFFFF4D4D)));
+    ScaffoldMessenger.of(context).showSnackBar(
+      _buildSnackbar(message, BatikColors.marun),
+    );
   }
 
   void _showSuccessSnackbar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(_buildSnackbar(message, _neon));
+    ScaffoldMessenger.of(context).showSnackBar(
+      _buildSnackbar(message, BatikColors.hijau),
+    );
   }
 
   void _showInfoSnackbar(String message) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(_buildSnackbar(message, const Color(0xFF2A2A2A)));
+    ScaffoldMessenger.of(context).showSnackBar(
+      _buildSnackbar(message, BatikColors.soga),
+    );
   }
 
   SnackBar _buildSnackbar(String message, Color borderColor) {
     return SnackBar(
       content: Text(
         message,
-        style: GoogleFonts.poppins(fontSize: 13, color: Colors.white),
+        style: GoogleFonts.nunitoSans(fontSize: 13, color: BatikColors.sogaGelap),
       ),
-      backgroundColor: const Color(0xFF1A1A1A),
+      backgroundColor: BatikColors.putih,
       behavior: SnackBarBehavior.floating,
       margin: const EdgeInsets.all(16),
       shape: RoundedRectangleBorder(
@@ -475,7 +463,10 @@ class _UserProfilePageState extends State<UserProfilePage>
       body: SafeArea(
         child: _loadingUser
             ? const Center(
-                child: CircularProgressIndicator(color: _neon, strokeWidth: 2),
+                child: CircularProgressIndicator(
+                  color: BatikColors.marun,
+                  strokeWidth: 2,
+                ),
               )
             : _error != null
             ? _ErrorView(error: _error!, onRetry: _fetchData)
@@ -494,26 +485,24 @@ class _UserProfilePageState extends State<UserProfilePage>
                             width: 40,
                             height: 40,
                             decoration: BoxDecoration(
-                              color: _neonDim,
+                              color: BatikColors.marun.withValues(alpha: 0.12),
                               borderRadius: BorderRadius.circular(12),
                               boxShadow: [
                                 BoxShadow(
-                                  color: _neon.withValues(alpha: 0.25),
+                                  color: BatikColors.marun.withValues(alpha: 0.15),
                                   blurRadius: 12,
-                                  spreadRadius: 0,
                                 ),
                               ],
                             ),
                             child: const Icon(
                               Icons.arrow_back_rounded,
-                              color: _neon,
+                              color: BatikColors.marun,
                               size: 24,
                             ),
                           ),
                         ),
                       ),
                     ),
-                    // CustomScrollView
                     Expanded(
                       child: CustomScrollView(
                         slivers: [
@@ -583,12 +572,11 @@ class _ProfileCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: _surface,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF1A1A1A)),
+        border: Border.all(color: BatikColors.garis),
         boxShadow: [
           BoxShadow(
-            color: _neon.withValues(alpha: 0.06),
+            color: BatikColors.sogaGelap.withValues(alpha: 0.06),
             blurRadius: 24,
-            spreadRadius: 0,
           ),
         ],
       ),
@@ -598,11 +586,11 @@ class _ProfileCard extends StatelessWidget {
             width: 56,
             height: 56,
             decoration: BoxDecoration(
-              color: _neonDim,
+              color: BatikColors.marun.withValues(alpha: 0.12),
               shape: BoxShape.circle,
               boxShadow: [
                 BoxShadow(
-                  color: _neon.withValues(alpha: 0.3),
+                  color: BatikColors.marun.withValues(alpha: 0.18),
                   blurRadius: 18,
                   spreadRadius: 2,
                 ),
@@ -611,10 +599,10 @@ class _ProfileCard extends StatelessWidget {
             child: Center(
               child: Text(
                 _initials,
-                style: GoogleFonts.poppins(
-                  fontSize: 20,
+                style: GoogleFonts.playfairDisplay(
+                  fontSize: 22,
                   fontWeight: FontWeight.w700,
-                  color: _neon,
+                  color: BatikColors.marun,
                 ),
               ),
             ),
@@ -626,10 +614,10 @@ class _ProfileCard extends StatelessWidget {
               children: [
                 Text(
                   user.name,
-                  style: GoogleFonts.poppins(
-                    fontSize: 16,
+                  style: GoogleFonts.playfairDisplay(
+                    fontSize: 17,
                     fontWeight: FontWeight.w700,
-                    color: Colors.white,
+                    color: BatikColors.sogaGelap,
                     letterSpacing: -0.2,
                   ),
                   maxLines: 1,
@@ -638,10 +626,10 @@ class _ProfileCard extends StatelessWidget {
                 const SizedBox(height: 3),
                 Text(
                   '@${user.username}',
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.nunitoSans(
                     fontSize: 13,
-                    color: _neon,
-                    fontWeight: FontWeight.w500,
+                    color: BatikColors.marun,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -651,12 +639,16 @@ class _ProfileCard extends StatelessWidget {
                       label: user.isVerified
                           ? 'Terverifikasi'
                           : 'Belum Verifikasi',
-                      color: user.isVerified ? _neon : const Color(0xFFFFB800),
+                      color: user.isVerified
+                          ? BatikColors.hijau
+                          : BatikColors.emas,
                     ),
                     const SizedBox(width: 8),
                     _StatusBadge(
                       label: user.isActive ? 'Aktif' : 'Nonaktif',
-                      color: user.isActive ? _neon : const Color(0xFFFF4D4D),
+                      color: user.isActive
+                          ? BatikColors.hijau
+                          : BatikColors.marun,
                     ),
                   ],
                 ),
@@ -685,7 +677,7 @@ class _StatusBadge extends StatelessWidget {
       ),
       child: Text(
         label,
-        style: GoogleFonts.poppins(
+        style: GoogleFonts.nunitoSans(
           fontSize: 10,
           fontWeight: FontWeight.w600,
           color: color,
@@ -718,14 +710,14 @@ class _CredentialCard extends StatelessWidget {
               const Icon(
                 Icons.mail_outline_rounded,
                 size: 16,
-                color: _textMuted,
+                color: BatikColors.abuTeks,
               ),
               const SizedBox(width: 10),
               Text(
                 'Email',
-                style: GoogleFonts.poppins(
+                style: GoogleFonts.nunitoSans(
                   fontSize: 12,
-                  color: _textMuted,
+                  color: BatikColors.abuTeks,
                   fontWeight: FontWeight.w500,
                 ),
               ),
@@ -735,9 +727,9 @@ class _CredentialCard extends StatelessWidget {
                 children: [
                   Text(
                     user.email,
-                    style: GoogleFonts.poppins(
+                    style: GoogleFonts.nunitoSans(
                       fontSize: 13,
-                      color: Colors.white,
+                      color: BatikColors.sogaGelap,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
@@ -746,10 +738,10 @@ class _CredentialCard extends StatelessWidget {
                     onTap: onChangeEmail,
                     child: Text(
                       'Ganti Email',
-                      style: GoogleFonts.poppins(
+                      style: GoogleFonts.nunitoSans(
                         fontSize: 11,
-                        color: _neon,
-                        fontWeight: FontWeight.w500,
+                        color: BatikColors.marun,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
@@ -763,7 +755,7 @@ class _CredentialCard extends StatelessWidget {
           icon: Icons.tag_rounded,
           label: 'User ID',
           value: '#${user.id}',
-          valueColor: _textMuted,
+          valueColor: BatikColors.abuTeks,
         ),
       ],
     );
@@ -795,10 +787,10 @@ class _SessionsCard extends StatelessWidget {
               onTap: onLogoutOtherDevices,
               child: Text(
                 'Logout device lain',
-                style: GoogleFonts.poppins(
+                style: GoogleFonts.nunitoSans(
                   fontSize: 11,
-                  color: const Color(0xFFFF4D4D),
-                  fontWeight: FontWeight.w500,
+                  color: BatikColors.marun,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             )
@@ -809,7 +801,10 @@ class _SessionsCard extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(vertical: 8),
                 child: Text(
                   'Tidak ada sesi aktif.',
-                  style: GoogleFonts.poppins(fontSize: 13, color: _textMuted),
+                  style: GoogleFonts.nunitoSans(
+                    fontSize: 13,
+                    color: BatikColors.abuTeks,
+                  ),
                 ),
               ),
             ]
@@ -854,13 +849,17 @@ class _SessionTile extends StatelessWidget {
             width: 36,
             height: 36,
             decoration: BoxDecoration(
-              color: session.isCurrent ? _neonDim : const Color(0xFF1A1A1A),
+              color: session.isCurrent
+                  ? BatikColors.marun.withValues(alpha: 0.12)
+                  : BatikColors.krem,
               borderRadius: BorderRadius.circular(10),
             ),
             child: Icon(
               Icons.smartphone_rounded,
               size: 18,
-              color: session.isCurrent ? _neon : _textMuted,
+              color: session.isCurrent
+                  ? BatikColors.marun
+                  : BatikColors.abuTeks,
             ),
           ),
           const SizedBox(width: 12),
@@ -873,10 +872,10 @@ class _SessionTile extends StatelessWidget {
                     Expanded(
                       child: Text(
                         session.deviceInfo,
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 12,
-                          color: Colors.white,
-                          fontWeight: FontWeight.w500,
+                          color: BatikColors.sogaGelap,
+                          fontWeight: FontWeight.w600,
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -890,14 +889,14 @@ class _SessionTile extends StatelessWidget {
                           vertical: 2,
                         ),
                         decoration: BoxDecoration(
-                          color: _neonDim,
+                          color: BatikColors.marun.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Text(
                           'Device ini',
-                          style: GoogleFonts.poppins(
+                          style: GoogleFonts.nunitoSans(
                             fontSize: 9,
-                            color: _neon,
+                            color: BatikColors.marun,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -907,7 +906,10 @@ class _SessionTile extends StatelessWidget {
                 const SizedBox(height: 3),
                 Text(
                   'Login ${_formatDate(session.createdAt)}',
-                  style: GoogleFonts.poppins(fontSize: 11, color: _textMuted),
+                  style: GoogleFonts.nunitoSans(
+                    fontSize: 11,
+                    color: BatikColors.abuTeks,
+                  ),
                 ),
               ],
             ),
@@ -935,11 +937,11 @@ class _LogoutButton extends StatelessWidget {
       child: OutlinedButton(
         onPressed: isLoading ? null : onPressed,
         style: OutlinedButton.styleFrom(
-          side: const BorderSide(color: Color(0xFFFF4D4D), width: 1.5),
+          side: const BorderSide(color: BatikColors.marun, width: 1.5),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
           ),
-          backgroundColor: const Color(0xFFFF4D4D).withValues(alpha: 0.06),
+          backgroundColor: BatikColors.marun.withValues(alpha: 0.06),
         ),
         child: isLoading
             ? const SizedBox(
@@ -947,7 +949,7 @@ class _LogoutButton extends StatelessWidget {
                 height: 22,
                 child: CircularProgressIndicator(
                   strokeWidth: 2.5,
-                  color: Color(0xFFFF4D4D),
+                  color: BatikColors.marun,
                 ),
               )
             : Row(
@@ -956,15 +958,15 @@ class _LogoutButton extends StatelessWidget {
                   const Icon(
                     Icons.logout_rounded,
                     size: 18,
-                    color: Color(0xFFFF4D4D),
+                    color: BatikColors.marun,
                   ),
                   const SizedBox(width: 8),
                   Text(
                     'Keluar',
-                    style: GoogleFonts.poppins(
+                    style: GoogleFonts.nunitoSans(
                       fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      color: const Color(0xFFFF4D4D),
+                      fontWeight: FontWeight.w700,
+                      color: BatikColors.marun,
                       letterSpacing: 0.2,
                     ),
                   ),
@@ -998,7 +1000,7 @@ class _SectionCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: _surface,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF1A1A1A)),
+        border: Border.all(color: BatikColors.garis),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1007,14 +1009,14 @@ class _SectionCard extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
             child: Row(
               children: [
-                Icon(icon, size: 15, color: _neon),
+                Icon(icon, size: 15, color: BatikColors.marun),
                 const SizedBox(width: 7),
                 Text(
                   title,
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.nunitoSans(
                     fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: _neon,
+                    fontWeight: FontWeight.w700,
+                    color: BatikColors.marun,
                     letterSpacing: 0.3,
                   ),
                 ),
@@ -1023,7 +1025,7 @@ class _SectionCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 4),
-          Container(height: 1, color: const Color(0xFF161616)),
+          Container(height: 1, color: BatikColors.garis),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Column(
@@ -1060,22 +1062,22 @@ class _InfoRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: Row(
         children: [
-          Icon(icon, size: 16, color: _textMuted),
+          Icon(icon, size: 16, color: BatikColors.abuTeks),
           const SizedBox(width: 10),
           Text(
             label,
-            style: GoogleFonts.poppins(
+            style: GoogleFonts.nunitoSans(
               fontSize: 12,
-              color: _textMuted,
+              color: BatikColors.abuTeks,
               fontWeight: FontWeight.w500,
             ),
           ),
           const Spacer(),
           Text(
             value,
-            style: GoogleFonts.poppins(
+            style: GoogleFonts.nunitoSans(
               fontSize: 13,
-              color: valueColor ?? Colors.white,
+              color: valueColor ?? BatikColors.sogaGelap,
               fontWeight: FontWeight.w500,
             ),
           ),
@@ -1092,7 +1094,7 @@ class _InfoRow extends StatelessWidget {
 class _Divider extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
-      Container(height: 1, color: const Color(0xFF161616));
+      Container(height: 1, color: BatikColors.garis);
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,13 +1114,14 @@ class _ErrorView extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.wifi_off_rounded, color: _textMuted, size: 48),
+            const Icon(Icons.wifi_off_rounded,
+                color: BatikColors.abuTeks, size: 48),
             const SizedBox(height: 16),
             Text(
               error,
-              style: GoogleFonts.poppins(
+              style: GoogleFonts.nunitoSans(
                 fontSize: 13,
-                color: _textMuted,
+                color: BatikColors.abuTeks,
                 height: 1.5,
               ),
               textAlign: TextAlign.center,
@@ -1127,7 +1130,7 @@ class _ErrorView extends StatelessWidget {
             OutlinedButton(
               onPressed: onRetry,
               style: OutlinedButton.styleFrom(
-                side: const BorderSide(color: _neon),
+                side: const BorderSide(color: BatikColors.marun),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10),
                 ),
@@ -1138,9 +1141,9 @@ class _ErrorView extends StatelessWidget {
               ),
               child: Text(
                 'Coba Lagi',
-                style: GoogleFonts.poppins(
+                style: GoogleFonts.nunitoSans(
                   fontSize: 13,
-                  color: _neon,
+                  color: BatikColors.marun,
                   fontWeight: FontWeight.w600,
                 ),
               ),

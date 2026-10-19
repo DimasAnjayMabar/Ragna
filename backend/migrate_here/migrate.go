@@ -1,3 +1,4 @@
+//go:build windows
 package main
 
 import (
@@ -9,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/tadvi/winc"
 )
@@ -105,14 +108,54 @@ func main() {
 	logEdit.SetPos(20, 140)
 	logEdit.SetSize(760, 480)
 
-	appendLog := func(msg string) {
-		current := logEdit.Text()
-		logEdit.SetText(current + msg + "\r\n")
+	// ── Rolling log buffer ─────────────────────────────────────────
+	// Win32 MultiEdit punya batas ukuran teks (bisa terpotong kalau
+	// terlalu panjang). Kita simpan hanya MAX_LOG_LINES baris terakhir
+	// di memori, dan rebuild kontrol hanya saat buffer melebihi batas.
+	// Di antara rebuild, append biasa supaya tetap cepat.
+	const MaxLogLines = 5000
+	const TrimBatch   = 500 // buang sekian baris sekaligus saat limit tercapai
 
+	var logMu sync.Mutex
+	logLines := make([]string, 0, MaxLogLines+TrimBatch)
+	logNeedsRebuild := false
+
+	scrollToBottom := func() {
 		textLen := uintptr(len(logEdit.Text()))
 		sendMessage(logEdit.Handle(), EM_SETSEL, textLen, textLen)
 		sendMessage(logEdit.Handle(), EM_SCROLLCARET, 0, 0)
 		sendMessage(logEdit.Handle(), WM_VSCROLL, SB_BOTTOM, 0)
+	}
+
+	appendLog := func(msg string) {
+		logMu.Lock()
+		defer logMu.Unlock()
+
+		// Pecah per baris supaya hitungan baris akurat (msg bisa multi-line).
+		for _, ln := range strings.Split(msg, "\n") {
+			ln = strings.TrimRight(ln, "\r")
+			logLines = append(logLines, ln)
+		}
+
+		// Kalau melebihi batas, buang yang paling lama sekaligus (batch)
+		// supaya tidak rebuild tiap 1 baris.
+		if len(logLines) > MaxLogLines+TrimBatch {
+			drop := len(logLines) - MaxLogLines
+			logLines = append(logLines[:0], logLines[drop:]...)
+			logNeedsRebuild = true
+		}
+
+		if logNeedsRebuild {
+			// Rebuild seluruh kontrol dari buffer (jarang terjadi).
+			logEdit.SetText(strings.Join(logLines, "\r\n"))
+			logNeedsRebuild = false
+		} else {
+			// Append incremental (cepat).
+			current := logEdit.Text()
+			logEdit.SetText(current + msg + "\r\n")
+		}
+
+		scrollToBottom()
 	}
 
 	allButtons := []*winc.PushButton{
@@ -205,12 +248,16 @@ func main() {
 	})
 
 	btnClear.OnClick().Bind(func(e *winc.Event) {
+		logMu.Lock()
+		logLines = logLines[:0]
+		logNeedsRebuild = false
+		logMu.Unlock()
 		logEdit.SetText("")
 	})
 
 	btnStop.OnClick().Bind(func(e *winc.Event) {
 		if cancelTask != nil {
-			appendLog("\r\n[!] Cancelling current process...")
+			appendLog("\r\n[!] Cancelling current process tree...")
 			cancelTask()
 		}
 	})
@@ -218,6 +265,8 @@ func main() {
 	mainWindow.OnClose().Bind(func(e *winc.Event) {
 		if cancelTask != nil {
 			cancelTask()
+			// Beri waktu singkat agar kill process tree sempat berjalan
+			time.Sleep(300 * time.Millisecond)
 		}
 		winc.Exit()
 	})
@@ -251,7 +300,7 @@ func resolvePythonEnv() PyEnv {
 			absAlembic, _ := filepath.Abs(alembicPath)
 
 			cmd := exec.Command(absPy, "-c", "import alembic, sqlalchemy, pymysql")
-			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+			setProcAttr(cmd)
 			if err := cmd.Run(); err == nil {
 				cmdAlembic := absAlembic
 				if !fileExists(absAlembic) {
@@ -265,7 +314,7 @@ func resolvePythonEnv() PyEnv {
 	// 2. Check system PATH
 	if absPy, err := exec.LookPath("python"); err == nil {
 		cmd := exec.Command(absPy, "-c", "import alembic, sqlalchemy, pymysql")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+		setProcAttr(cmd)
 		if err := cmd.Run(); err == nil {
 			if absAlembic, err := exec.LookPath("alembic"); err == nil {
 				return PyEnv{PythonCmd: absPy, AlembicCmd: absAlembic, IsValid: true}
@@ -306,7 +355,7 @@ func runAlembicCommand(ctx context.Context, logFn func(string), workDir string, 
 
 // ==================== CORE FUNCTIONS ====================
 
-func getDatabaseURL() string {
+func getDatabaseURL() (string, error) {
 	paths := []string{
 		".env",
 		filepath.Join("..", ".env"),
@@ -314,31 +363,116 @@ func getDatabaseURL() string {
 	}
 
 	for _, path := range paths {
-		if fileBytes, err := os.ReadFile(path); err == nil {
-			lines := strings.Split(string(fileBytes), "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "#") || line == "" {
-					continue
-				}
-				if strings.Contains(line, "=") {
-					parts := strings.SplitN(line, "=", 2)
-					key := strings.TrimSpace(parts[0])
-					val := strings.TrimSpace(parts[1])
-					val = strings.Trim(val, `"'`)
-
-					if strings.EqualFold(key, "DATABASE_URL") || strings.EqualFold(key, "DB_URL") {
-						return val
-					}
-					if strings.HasPrefix(val, "mysql+pymysql://") || strings.HasPrefix(val, "mysql://") || strings.HasPrefix(val, "postgresql://") || strings.HasPrefix(val, "sqlite://") {
-						return val
-					}
-				}
+		fileBytes, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(string(fileBytes), "\n")
+		for _, raw := range lines {
+			line := strings.TrimSpace(raw)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
 			}
+			// support "export DATABASE_URL=..."
+			line = strings.TrimPrefix(line, "export ")
+			if !strings.Contains(line, "=") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			key := strings.TrimSpace(parts[0])
+			if !strings.EqualFold(key, "DATABASE_URL") {
+				continue
+			}
+			val := strings.TrimSpace(parts[1])
+			val = strings.Trim(val, `"'`)
+			if val == "" {
+				return "", fmt.Errorf("DATABASE_URL is empty in %s", path)
+			}
+			return val, nil
 		}
 	}
-	return "mysql+pymysql://root:@localhost:3306/ragna"
+
+	absCwd, _ := filepath.Abs(".")
+	return "", fmt.Errorf(
+		"DATABASE_URL not found in .env (searched: .env, ../.env, ../../.env relative to %s)",
+		absCwd,
+	)
 }
+
+func maskDBPassword(url string) string {
+	// cari "://"
+	i := strings.Index(url, "://")
+	if i < 0 {
+		return url
+	}
+	rest := url[i+3:]
+	// cari "@" pertama setelah scheme
+	at := strings.Index(rest, "@")
+	if at < 0 {
+		return url
+	}
+	userinfo := rest[:at]
+	colon := strings.Index(userinfo, ":")
+	if colon < 0 {
+		return url // tidak ada password
+	}
+	return url[:i+3] + userinfo[:colon] + ":***" + rest[at:]
+}
+
+// neo4jCheckScript melakukan koneksi nyata ke server Neo4j (bukan sekadar import package).
+// Jika tidak bisa connect (server mati / port salah), exit code != 0 sehingga runCommand
+// mengembalikan error dan log menampilkan ❌.
+const neo4jCheckScript = `
+import os, sys
+from pathlib import Path
+
+# ── Cari .env di cwd, parent, grandparent, great-grandparent ──
+def load_dotenv():
+    here = Path.cwd()
+    for base in [here, here.parent, here.parent.parent, here.parent.parent.parent]:
+        envfile = base / ".env"
+        if envfile.is_file():
+            print("neo4j: loading %s" % envfile)
+            try:
+                text = envfile.read_text(encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                text = envfile.read_text(encoding="utf-8", errors="replace")
+            for raw in text.splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                os.environ.setdefault(k, v)
+            return envfile
+    return None
+
+found = load_dotenv()
+if not found:
+    print("neo4j FAIL: .env not found (cwd=%s)" % os.getcwd())
+    sys.exit(1)
+
+try:
+    from neo4j import GraphDatabase
+    uri  = os.environ.get("NEO4J_URI", "") or os.environ.get("NEO4J_URL", "")
+    user = os.environ.get("NEO4J_USER", "") or os.environ.get("NEO4J_USERNAME", "")
+    pw   = os.environ.get("NEO4J_PASS", "") or os.environ.get("NEO4J_PASSWORD", "")
+    if not uri or not user or not pw:
+        print("neo4j FAIL: NEO4J_URI / NEO4J_USER / NEO4J_PASS not set in .env")
+        sys.exit(1)
+    drv = GraphDatabase.driver(uri, auth=(user, pw), connection_timeout=3)
+    drv.verify_connectivity()
+    with drv.session() as s:
+        s.run("RETURN 1").consume()
+    drv.close()
+    print("neo4j OK: %s" % uri)
+except Exception as e:
+    print("neo4j FAIL: %s" % e)
+    sys.exit(1)
+`
 
 func checkEnvironment(ctx context.Context, workDir string, logFn func(string)) error {
 	env := resolvePythonEnv()
@@ -356,11 +490,16 @@ func checkEnvironment(ctx context.Context, workDir string, logFn func(string)) e
 		{"Python", env.PythonCmd, []string{"--version"}},
 		{"PyMySQL", env.PythonCmd, []string{"-c", "import pymysql; print('pymysql OK')"}},
 		{"SQLAlchemy", env.PythonCmd, []string{"-c", "import sqlalchemy; print('sqlalchemy', sqlalchemy.__version__)"}},
+		// Neo4j: koneksi nyata, bukan import saja
+		{"Neo4j", env.PythonCmd, []string{"-c", neo4jCheckScript}},
 	}
 
 	for _, c := range checks {
 		logFn(fmt.Sprintf("\n[check] Checking %s...", c.name))
 		if err := runCommand(ctx, logFn, workDir, c.cmd, c.args...); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			logFn(fmt.Sprintf("  ❌ %s unavailable", c.name))
 			hasError = true
 		}
@@ -368,12 +507,15 @@ func checkEnvironment(ctx context.Context, workDir string, logFn func(string)) e
 
 	logFn("\n[check] Checking Alembic CLI...")
 	if err := runAlembicCommand(ctx, logFn, workDir, "--version"); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		logFn("  ❌ Alembic unavailable")
 		hasError = true
 	}
 
 	if hasError {
-		logFn(fmt.Sprintf("\n💡 Run this command in terminal to fix:\n   & \"%s\" -m pip install alembic pymysql sqlalchemy", env.PythonCmd))
+		logFn(fmt.Sprintf("\n💡 Run this command in terminal to fix:\n   & \"%s\" -m pip install alembic pymysql sqlalchemy neo4j", env.PythonCmd))
 	}
 
 	modelsPath := filepath.Join(workDir, "models.py")
@@ -387,8 +529,19 @@ func checkEnvironment(ctx context.Context, workDir string, logFn func(string)) e
 		logFn("\n[check] ❌ models.py not found in migrate_here or backend folder")
 	}
 
-	dbURL := getDatabaseURL()
-	logFn(fmt.Sprintf("\n[check] Database Connection URL: %s", dbURL))
+	logFn("\n[check] Reading DATABASE_URL from .env...")
+	dbURL, err := getDatabaseURL()
+	if err != nil {
+		logFn(fmt.Sprintf("  ❌ %v", err))
+		hasError = true
+	} else {
+		// Sembunyikan password kalau ada (user:pass@host)
+		logFn(fmt.Sprintf("  ✅ Database URL: %s", maskDBPassword(dbURL)))
+	}
+
+	if hasError {
+		logFn("\n⚠️  Environment has issues — fix the ❌ items above before running migrations.")
+	}
 	return nil
 }
 
@@ -397,8 +550,12 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// setupAlembic selalu melakukan RESET PENUH folder alembic/ + alembic.ini di workDir.
+// Cocok untuk fresh clone dari GitHub: jika folder lama masih ada (mis. sisa commit
+// yang menyertakan migrasi), akan dihapus agar tidak terjadi race condition antara
+// file migrasi lama dengan database yang masih kosong.
 func setupAlembic(workDir string, logFn func(string)) error {
-	// Clean up legacy duplicated files in parent backend folder
+	// 1) Hapus legacy duplikat di parent folder
 	parentIni := filepath.Join(workDir, "..", "alembic.ini")
 	parentAlembic := filepath.Join(workDir, "..", "alembic")
 	if fileExists(parentIni) {
@@ -412,69 +569,100 @@ func setupAlembic(workDir string, logFn func(string)) error {
 		}
 	}
 
-	alembicDir := filepath.Join(workDir, "alembic")
-	versionsDir := filepath.Join(alembicDir, "versions")
+	// 2) Reset penuh folder alembic/ + alembic.ini di workDir
+	localAlembic := filepath.Join(workDir, "alembic")
+	localIni := filepath.Join(workDir, "alembic.ini")
+
+	if fileExists(localAlembic) {
+		if err := os.RemoveAll(localAlembic); err != nil {
+			return fmt.Errorf("failed to reset alembic folder: %w", err)
+		}
+		logFn("🧹 Reset: removed existing alembic/ folder (fresh start).")
+	}
+	if fileExists(localIni) {
+		if err := os.Remove(localIni); err != nil {
+			return fmt.Errorf("failed to reset alembic.ini: %w", err)
+		}
+		logFn("🧹 Reset: removed existing alembic.ini.")
+	}
+
+	// 3) Buat ulang dari nol
+	versionsDir := filepath.Join(localAlembic, "versions")
 	if err := os.MkdirAll(versionsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create alembic folder: %w", err)
 	}
-	logFn("📁 Folder alembic/ and alembic/versions/ created inside migrate_here.")
+	logFn("📁 Fresh folder alembic/ and alembic/versions/ created inside migrate_here.")
 
-	iniPath := filepath.Join(workDir, "alembic.ini")
-	if fileExists(iniPath) {
-		logFn("ℹ️  alembic.ini already exists inside migrate_here.")
-	} else {
-		dbURL := getDatabaseURL()
-		iniContent := buildAlembicIni(dbURL)
-		if err := os.WriteFile(iniPath, []byte(iniContent), 0644); err != nil {
-			return fmt.Errorf("failed to write alembic.ini: %w", err)
-		}
-		logFn(fmt.Sprintf("📝 alembic.ini created in migrate_here with URL: %s", dbURL))
+	// 4) Tulis alembic.ini
+	dbURL, err := getDatabaseURL()
+	if err != nil {
+		// Rollback: hapus folder yang baru dibuat supaya tidak setengah jadi
+		_ = os.RemoveAll(localAlembic)
+		_ = os.Remove(localIni)
+		return fmt.Errorf("cannot setup alembic: %w", err)
 	}
-
-	envPath := filepath.Join(alembicDir, "env.py")
-	if fileExists(envPath) {
-		logFn("ℹ️  alembic/env.py already exists inside migrate_here.")
-	} else {
-		envContent := buildEnvPy()
-		if err := os.WriteFile(envPath, []byte(envContent), 0644); err != nil {
-			return fmt.Errorf("failed to write env.py: %w", err)
-		}
-		logFn("📝 alembic/env.py created.")
+	iniContent := buildAlembicIni(dbURL)
+	if err := os.WriteFile(localIni, []byte(iniContent), 0644); err != nil {
+		return fmt.Errorf("failed to write alembic.ini: %w", err)
 	}
+	logFn(fmt.Sprintf("📝 alembic.ini created in migrate_here with URL: %s", dbURL))
 
-	makoPath := filepath.Join(alembicDir, "script.py.mako")
-	if fileExists(makoPath) {
-		logFn("ℹ️  script.py.mako already exists inside migrate_here.")
-	} else {
-		makoContent := buildScriptMako()
-		if err := os.WriteFile(makoPath, []byte(makoContent), 0644); err != nil {
-			return fmt.Errorf("failed to write script.py.mako: %w", err)
-		}
-		logFn("📝 alembic/script.py.mako created.")
+	// 5) Tulis env.py
+	envPath := filepath.Join(localAlembic, "env.py")
+	if err := os.WriteFile(envPath, []byte(buildEnvPy()), 0644); err != nil {
+		return fmt.Errorf("failed to write env.py: %w", err)
 	}
+	logFn("📝 alembic/env.py created.")
 
-	readmePath := filepath.Join(alembicDir, "README")
-	os.WriteFile(readmePath, []byte("Single-database migration configuration for migrate_here.\n"), 0644)
+	// 6) Tulis script.py.mako
+	makoPath := filepath.Join(localAlembic, "script.py.mako")
+	if err := os.WriteFile(makoPath, []byte(buildScriptMako()), 0644); err != nil {
+		return fmt.Errorf("failed to write script.py.mako: %w", err)
+	}
+	logFn("📝 alembic/script.py.mako created.")
 
-	logFn("\n✅ Alembic setup completed in migrate_here folder.")
+	// 7) README
+	readmePath := filepath.Join(localAlembic, "README")
+	_ = os.WriteFile(readmePath, []byte("Single-database migration configuration for migrate_here.\n"), 0644)
+
+	logFn("\n✅ Alembic setup completed (fresh reset) in migrate_here folder.")
 	return nil
 }
 
+// initBaseline melakukan RESET baseline: hapus semua file migrasi di versions/
+// agar sinkron dengan DB yang masih kosong. Tidak lagi skip ketika sudah ada file.
 func initBaseline(workDir string, logFn func(string)) error {
 	versionsDir := filepath.Join(workDir, "alembic", "versions")
-	entries, err := os.ReadDir(versionsDir)
-	if err != nil {
-		return fmt.Errorf("alembic directory missing, please run Setup Alembic first: %w", err)
+	if !fileExists(versionsDir) {
+		return fmt.Errorf("alembic/versions not found, run Setup Alembic first")
 	}
 
+	entries, err := os.ReadDir(versionsDir)
+	if err != nil {
+		return fmt.Errorf("cannot read versions dir: %w", err)
+	}
+
+	removed := 0
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".py") {
-			logFn("ℹ️  Migration files already exist, skipping baseline init.")
-			return nil
+		name := e.Name()
+		if strings.HasSuffix(name, ".py") || name == "__pycache__" {
+			p := filepath.Join(versionsDir, name)
+			if err := os.RemoveAll(p); err != nil {
+				logFn(fmt.Sprintf("⚠️  Failed to remove %s: %v", p, err))
+				continue
+			}
+			logFn(fmt.Sprintf("🧹 Removed: versions/%s", name))
+			removed++
 		}
 	}
 
-	logFn("ℹ️  No migration files found yet. Generate migrations with Step 3.")
+	if removed > 0 {
+		logFn(fmt.Sprintf("\n✅ Baseline reset: %d item(s) removed from versions/.", removed))
+	} else {
+		logFn("ℹ️  versions/ already empty — baseline is clean.")
+	}
+
+	logFn("➡️  Next: Step 3 (Generate Migration) then Step 4 (Apply).")
 	return nil
 }
 
@@ -622,15 +810,17 @@ def downgrade() -> None:
 // ==================== STREAMING EXEC COMMAND ====================
 
 func runCommand(ctx context.Context, logFn func(string), workDir, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	// JANGAN pakai exec.CommandContext — kita kelola kill sendiri agar
+	// seluruh process tree ikut mati, bukan hanya proses utama.
+	cmd := exec.Command(name, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
 
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
-		CreationFlags: 0x08000000,
-	}
+	// Abstraksi per-OS (lihat proctree_windows.go / proctree_unix.go):
+	// Windows → HideWindow + CREATE_NO_WINDOW;
+	// Unix    → Setpgid agar kill(-pid) mengenai seluruh process group.
+	setProcAttr(cmd)
 
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
 
@@ -646,6 +836,22 @@ func runCommand(ctx context.Context, logFn func(string), workDir, name string, a
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+
+	pid := cmd.Process.Pid
+
+	// Watcher: jika ctx dibatalkan, kill seluruh process tree.
+	watcherDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			logFn("[!] Killing process tree (pid " + strconv.Itoa(pid) + ")...")
+			if err := killProcessTree(pid); err != nil {
+				logFn(fmt.Sprintf("[!] kill tree error: %v", err))
+			}
+		case <-watcherDone:
+			// proses selesai normal, tidak perlu kill
+		}
+	}()
 
 	lines := make(chan string, 500)
 	var wg sync.WaitGroup
@@ -689,5 +895,12 @@ func runCommand(ctx context.Context, logFn func(string), workDir, name string, a
 		logFn(line)
 	}
 
-	return cmd.Wait()
+	waitErr := cmd.Wait()
+	close(watcherDone)
+
+	// Jika user menekan Stop, jangan laporkan sebagai error nyata.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return waitErr
 }

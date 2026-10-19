@@ -1,6 +1,7 @@
 // lib/users/register.dart
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:frontend/chats/batik_theme.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -18,15 +19,15 @@ final _dio = Dio(
 );
 
 // ---------------------------------------------------------------------------
-// Warna & konstanta
+// Warna & konstanta — dipetakan dari palet batik
 // ---------------------------------------------------------------------------
 
-const _bg = Color(0xFF020202);
-const _neon = Color(0xFF16DB65);
-const _neonDim = Color(0x3316DB65); // neon 20% opacity — untuk glow layer
-const _surface = Color(0xFF0D0D0D);
-const _border = Color(0xFF16DB65);
-const _textMuted = Color(0xFFA3A3A3);
+const _bg        = BatikColors.kertas;
+const _neon      = BatikColors.marun;    // aksen utama (pengganti neon hijau)
+const _neonDim   = Color(0x268B251E);    // marun 15%
+const _surface   = BatikColors.putih;
+const _border    = BatikColors.marun;
+const _textMuted = BatikColors.abuTeks;
 
 // ---------------------------------------------------------------------------
 // RegisterPage
@@ -119,14 +120,17 @@ class _RegisterPageState extends State<RegisterPage>
       SnackBar(
         content: Text(
           message,
-          style: GoogleFonts.poppins(fontSize: 13, color: Colors.white),
+          style: GoogleFonts.nunitoSans(
+            fontSize: 13,
+            color: BatikColors.sogaGelap,
+          ),
         ),
-        backgroundColor: const Color(0xFF1A1A1A),
+        backgroundColor: BatikColors.putih,
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.all(16),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(10),
-          side: const BorderSide(color: Color(0xFFFF4D4D), width: 1),
+          side: const BorderSide(color: BatikColors.marun, width: 1),
         ),
       ),
     );
@@ -153,19 +157,19 @@ class _RegisterPageState extends State<RegisterPage>
                   // ── Heading ─────────────────────────────────────────────
                   Text(
                     'Buat Akun',
-                    style: GoogleFonts.poppins(
+                    style: GoogleFonts.playfairDisplay(
                       fontSize: 28,
                       fontWeight: FontWeight.w700,
-                      color: Colors.white,
+                      color: BatikColors.sogaGelap,
                       letterSpacing: -0.5,
                     ),
                   ),
                   const SizedBox(height: 6),
                   Text(
                     'Daftarkan akun untuk mulai menggunakan Ragna.',
-                    style: GoogleFonts.poppins(
+                    style: GoogleFonts.nunitoSans(
                       fontSize: 13,
-                      color: _textMuted,
+                      color: BatikColors.abuTeks,
                       height: 1.5,
                     ),
                   ),
@@ -226,7 +230,7 @@ class _RegisterPageState extends State<RegisterPage>
                         _obscurePassword
                             ? Icons.visibility_off_outlined
                             : Icons.visibility_outlined,
-                        color: _neon,
+                        color: BatikColors.marun,
                         size: 20,
                       ),
                       onPressed: () =>
@@ -254,9 +258,9 @@ class _RegisterPageState extends State<RegisterPage>
                     children: [
                       Text(
                         'Sudah punya akun? ',
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 13,
-                          color: _textMuted,
+                          color: BatikColors.abuTeks,
                         ),
                       ),
                       GestureDetector(
@@ -265,10 +269,10 @@ class _RegisterPageState extends State<RegisterPage>
                         },
                         child: Text(
                           'Masuk',
-                          style: GoogleFonts.poppins(
+                          style: GoogleFonts.nunitoSans(
                             fontSize: 13,
-                            color: _neon,
-                            fontWeight: FontWeight.w600,
+                            color: BatikColors.marun,
+                            fontWeight: FontWeight.w700,
                           ),
                         ),
                       ),
@@ -306,24 +310,22 @@ class _BackButton extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Neon-styled back icon inside a subtle container
           Container(
             width: 40,
             height: 40,
             decoration: BoxDecoration(
-              color: _neonDim,
+              color: BatikColors.marun.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(12),
               boxShadow: [
                 BoxShadow(
-                  color: _neon.withValues(alpha: 0.25),
+                  color: BatikColors.marun.withValues(alpha: 0.15),
                   blurRadius: 12,
-                  spreadRadius: 0,
                 ),
               ],
             ),
             child: const Icon(
               Icons.arrow_back_rounded,
-              color: _neon,
+              color: BatikColors.marun,
               size: 24,
             ),
           ),
@@ -335,7 +337,7 @@ class _BackButton extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Neon TextField
+// Batik TextField (sebelumnya _NeonField)
 // ---------------------------------------------------------------------------
 
 class _NeonField extends StatefulWidget {
@@ -378,10 +380,10 @@ class _NeonFieldState extends State<_NeonField> {
         // Label
         Text(
           widget.label,
-          style: GoogleFonts.poppins(
+          style: GoogleFonts.nunitoSans(
             fontSize: 12,
-            fontWeight: FontWeight.w500,
-            color: _focused ? _neon : _textMuted,
+            fontWeight: FontWeight.w600,
+            color: _focused ? BatikColors.marun : BatikColors.abuTeks,
             letterSpacing: 0.3,
           ),
         ),
@@ -395,9 +397,8 @@ class _NeonFieldState extends State<_NeonField> {
             boxShadow: _focused
                 ? [
                     BoxShadow(
-                      color: _neon.withValues(alpha: 0.25),
+                      color: BatikColors.marun.withValues(alpha: 0.15),
                       blurRadius: 16,
-                      spreadRadius: 0,
                     ),
                   ]
                 : [],
@@ -411,18 +412,21 @@ class _NeonFieldState extends State<_NeonField> {
               textInputAction: widget.textInputAction,
               onFieldSubmitted: widget.onFieldSubmitted,
               validator: widget.validator,
-              style: GoogleFonts.poppins(
+              style: GoogleFonts.nunitoSans(
                 fontSize: 14,
-                color: _neon,
+                color: BatikColors.sogaGelap,
                 fontWeight: FontWeight.w500,
               ),
-              cursorColor: _neon,
+              cursorColor: BatikColors.marun,
               decoration: InputDecoration(
                 hintText: widget.hint,
-                hintStyle: GoogleFonts.poppins(fontSize: 14, color: _textMuted),
+                hintStyle: GoogleFonts.nunitoSans(
+                  fontSize: 14,
+                  color: BatikColors.abuTeks,
+                ),
                 prefixIcon: Icon(
                   widget.icon,
-                  color: _focused ? _neon : _textMuted,
+                  color: _focused ? BatikColors.marun : BatikColors.abuTeks,
                   size: 20,
                 ),
                 suffixIcon: widget.suffixIcon,
@@ -435,7 +439,7 @@ class _NeonFieldState extends State<_NeonField> {
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: const BorderSide(
-                    color: Color(0xFF1A1A1A),
+                    color: BatikColors.garis,
                     width: 1.5,
                   ),
                 ),
@@ -445,21 +449,21 @@ class _NeonFieldState extends State<_NeonField> {
                 ),
                 errorBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(
-                    color: Colors.red.shade700,
+                  borderSide: const BorderSide(
+                    color: BatikColors.marun,
                     width: 1.5,
                   ),
                 ),
                 focusedErrorBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(
-                    color: Colors.red.shade700,
+                  borderSide: const BorderSide(
+                    color: BatikColors.marun,
                     width: 1.5,
                   ),
                 ),
-                errorStyle: GoogleFonts.poppins(
+                errorStyle: GoogleFonts.nunitoSans(
                   fontSize: 11,
-                  color: Colors.red.shade400,
+                  color: BatikColors.marun,
                 ),
               ),
             ),
@@ -471,7 +475,7 @@ class _NeonFieldState extends State<_NeonField> {
 }
 
 // ---------------------------------------------------------------------------
-// Neon Button
+// Batik Button (sebelumnya _NeonButton)
 // ---------------------------------------------------------------------------
 
 class _NeonButton extends StatelessWidget {
@@ -495,9 +499,8 @@ class _NeonButton extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
           boxShadow: [
             BoxShadow(
-              color: _neon.withValues(alpha: 0.35),
+              color: BatikColors.marun.withValues(alpha: 0.25),
               blurRadius: 20,
-              spreadRadius: 0,
               offset: const Offset(0, 4),
             ),
           ],
@@ -505,9 +508,9 @@ class _NeonButton extends StatelessWidget {
         child: ElevatedButton(
           onPressed: isLoading ? null : onPressed,
           style: ElevatedButton.styleFrom(
-            backgroundColor: _neon,
-            disabledBackgroundColor: _neon.withValues(alpha: 0.5),
-            foregroundColor: Colors.black,
+            backgroundColor: BatikColors.marun,
+            disabledBackgroundColor: BatikColors.marun.withValues(alpha: 0.5),
+            foregroundColor: Colors.white,
             elevation: 0,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(14),
@@ -519,15 +522,15 @@ class _NeonButton extends StatelessWidget {
                   height: 22,
                   child: CircularProgressIndicator(
                     strokeWidth: 2.5,
-                    color: Colors.black,
+                    color: Colors.white,
                   ),
                 )
               : Text(
                   label,
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.nunitoSans(
                     fontSize: 15,
                     fontWeight: FontWeight.w700,
-                    color: Colors.black,
+                    color: Colors.white,
                     letterSpacing: 0.3,
                   ),
                 ),
