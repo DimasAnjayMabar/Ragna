@@ -14,3 +14,6 @@ agribot.sql
 save_data
 alembic
 alembic.ini
+data_umkm_batik_trenggalek.xls
+batik_seeder.py
+production_tool.py
