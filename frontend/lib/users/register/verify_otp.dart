@@ -2,6 +2,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:frontend/chats/batik_theme.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -19,15 +20,15 @@ final _dio = Dio(
 );
 
 // ---------------------------------------------------------------------------
-// Warna & konstanta
+// Warna & konstanta — dipetakan dari palet batik
 // ---------------------------------------------------------------------------
 
-const _bg = Color(0xFF020202);
-const _neon = Color(0xFF16DB65);
-const _neonDim = Color(0x3316DB65);
-const _surface = Color(0xFF0D0D0D);
-const _border = Color(0xFF16DB65);
-const _textMuted = Color(0xFFA3A3A3);
+const _bg        = BatikColors.kertas;
+const _neon      = BatikColors.marun;    // aksen utama (pengganti neon hijau)
+const _neonDim   = Color(0x268B251E);    // marun 15%
+const _surface   = BatikColors.putih;
+const _border    = BatikColors.marun;
+const _textMuted = BatikColors.abuTeks;
 
 const _otpLength = 6;
 
@@ -167,14 +168,17 @@ class _RegisterVerifyOtpPageState extends State<RegisterVerifyOtpPage>
       SnackBar(
         content: Text(
           message,
-          style: GoogleFonts.poppins(fontSize: 13, color: Colors.white),
+          style: GoogleFonts.nunitoSans(
+            fontSize: 13,
+            color: BatikColors.sogaGelap,
+          ),
         ),
-        backgroundColor: const Color(0xFF1A1A1A),
+        backgroundColor: BatikColors.putih,
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.all(16),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(10),
-          side: const BorderSide(color: Color(0xFFFF4D4D), width: 1),
+          side: const BorderSide(color: BatikColors.marun, width: 1),
         ),
       ),
     );
@@ -185,12 +189,17 @@ class _RegisterVerifyOtpPageState extends State<RegisterVerifyOtpPage>
       SnackBar(
         content: Text(
           message,
-          style: GoogleFonts.poppins(fontSize: 13, color: Colors.black),
+          style: GoogleFonts.nunitoSans(
+            fontSize: 13,
+            color: Colors.white,
+          ),
         ),
-        backgroundColor: _neon,
+        backgroundColor: BatikColors.hijau,
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.all(16),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+        ),
       ),
     );
   }
@@ -219,19 +228,18 @@ class _RegisterVerifyOtpPageState extends State<RegisterVerifyOtpPage>
                       width: 40,
                       height: 40,
                       decoration: BoxDecoration(
-                        color: _neonDim,
+                        color: BatikColors.marun.withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(12),
                         boxShadow: [
                           BoxShadow(
-                            color: _neon.withValues(alpha: 0.25),
+                            color: BatikColors.marun.withValues(alpha: 0.15),
                             blurRadius: 12,
-                            spreadRadius: 0,
                           ),
                         ],
                       ),
                       child: const Icon(
                         Icons.arrow_back_rounded,
-                        color: _neon,
+                        color: BatikColors.marun,
                         size: 24,
                       ),
                     ),
@@ -241,29 +249,29 @@ class _RegisterVerifyOtpPageState extends State<RegisterVerifyOtpPage>
                   // ── Title ─────────────────────────────────────────────────
                   Text(
                     'Verifikasi OTP',
-                    style: GoogleFonts.poppins(
+                    style: GoogleFonts.playfairDisplay(
                       fontSize: 28,
                       fontWeight: FontWeight.w700,
-                      color: Colors.white,
+                      color: BatikColors.sogaGelap,
                       letterSpacing: -0.5,
                     ),
                   ),
                   const SizedBox(height: 8),
                   RichText(
                     text: TextSpan(
-                      style: GoogleFonts.poppins(
+                      style: GoogleFonts.nunitoSans(
                         fontSize: 13,
-                        color: _textMuted,
+                        color: BatikColors.abuTeks,
                         height: 1.6,
                       ),
                       children: [
                         const TextSpan(text: 'Kode OTP telah dikirim ke\n'),
                         TextSpan(
                           text: widget.email,
-                          style: GoogleFonts.poppins(
+                          style: GoogleFonts.nunitoSans(
                             fontSize: 13,
-                            color: _neon,
-                            fontWeight: FontWeight.w600,
+                            color: BatikColors.marun,
+                            fontWeight: FontWeight.w700,
                           ),
                         ),
                       ],
@@ -278,10 +286,10 @@ class _RegisterVerifyOtpPageState extends State<RegisterVerifyOtpPage>
                       vertical: 14,
                     ),
                     decoration: BoxDecoration(
-                      color: _neonDim,
+                      color: BatikColors.krem,
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(
-                        color: _neon.withValues(alpha: 0.25),
+                        color: BatikColors.emas.withValues(alpha: 0.5),
                         width: 1,
                       ),
                     ),
@@ -290,7 +298,7 @@ class _RegisterVerifyOtpPageState extends State<RegisterVerifyOtpPage>
                       children: [
                         const Icon(
                           Icons.info_outline_rounded,
-                          color: _neon,
+                          color: BatikColors.emas,
                           size: 18,
                         ),
                         const SizedBox(width: 10),
@@ -298,9 +306,9 @@ class _RegisterVerifyOtpPageState extends State<RegisterVerifyOtpPage>
                           child: Text(
                             'Kode OTP berlaku selama 10 menit dan hanya dapat '
                             'diminta 5 kali per hari.',
-                            style: GoogleFonts.poppins(
+                            style: GoogleFonts.nunitoSans(
                               fontSize: 12,
-                              color: _neon,
+                              color: BatikColors.soga,
                               height: 1.5,
                             ),
                           ),
@@ -341,14 +349,14 @@ class _RegisterVerifyOtpPageState extends State<RegisterVerifyOtpPage>
                             height: 18,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              color: _neon.withValues(alpha: 0.6),
+                              color: BatikColors.marun.withValues(alpha: 0.6),
                             ),
                           )
                         : RichText(
                             text: TextSpan(
-                              style: GoogleFonts.poppins(
+                              style: GoogleFonts.nunitoSans(
                                 fontSize: 13,
-                                color: _textMuted,
+                                color: BatikColors.abuTeks,
                               ),
                               children: [
                                 const TextSpan(
@@ -360,12 +368,12 @@ class _RegisterVerifyOtpPageState extends State<RegisterVerifyOtpPage>
                                         _resendEnabled ? _handleResend : null,
                                     child: Text(
                                       'Kirim ulang',
-                                      style: GoogleFonts.poppins(
+                                      style: GoogleFonts.nunitoSans(
                                         fontSize: 13,
-                                        fontWeight: FontWeight.w600,
+                                        fontWeight: FontWeight.w700,
                                         color: _resendEnabled
-                                            ? _neon
-                                            : _textMuted,
+                                            ? BatikColors.marun
+                                            : BatikColors.abuTeks,
                                       ),
                                     ),
                                   ),
@@ -385,7 +393,7 @@ class _RegisterVerifyOtpPageState extends State<RegisterVerifyOtpPage>
 }
 
 // ---------------------------------------------------------------------------
-// Neon TextField
+// Batik TextField (sebelumnya _NeonField)
 // ---------------------------------------------------------------------------
 
 class _NeonField extends StatefulWidget {
@@ -425,10 +433,10 @@ class _NeonFieldState extends State<_NeonField> {
       children: [
         Text(
           widget.label,
-          style: GoogleFonts.poppins(
+          style: GoogleFonts.nunitoSans(
             fontSize: 12,
-            fontWeight: FontWeight.w500,
-            color: _focused ? _neon : _textMuted,
+            fontWeight: FontWeight.w600,
+            color: _focused ? BatikColors.marun : BatikColors.abuTeks,
             letterSpacing: 0.3,
           ),
         ),
@@ -438,7 +446,12 @@ class _NeonFieldState extends State<_NeonField> {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(12),
             boxShadow: _focused
-                ? [BoxShadow(color: _neon.withValues(alpha: 0.25), blurRadius: 16)]
+                ? [
+                    BoxShadow(
+                      color: BatikColors.marun.withValues(alpha: 0.15),
+                      blurRadius: 16,
+                    ),
+                  ]
                 : [],
           ),
           child: Focus(
@@ -451,23 +464,23 @@ class _NeonFieldState extends State<_NeonField> {
               textInputAction: widget.textInputAction,
               onFieldSubmitted: widget.onFieldSubmitted,
               textAlign: TextAlign.center,
-              style: GoogleFonts.poppins(
+              style: GoogleFonts.nunitoSans(
                 fontSize: 22,
                 fontWeight: FontWeight.w700,
-                color: _neon,
+                color: BatikColors.sogaGelap,
                 letterSpacing: 8,
               ),
-              cursorColor: _neon,
+              cursorColor: BatikColors.marun,
               decoration: InputDecoration(
                 hintText: widget.hint,
-                hintStyle: GoogleFonts.poppins(
+                hintStyle: GoogleFonts.nunitoSans(
                   fontSize: 14,
-                  color: _textMuted,
+                  color: BatikColors.abuTeks,
                   letterSpacing: 0,
                 ),
                 prefixIcon: Icon(
                   widget.icon,
-                  color: _focused ? _neon : _textMuted,
+                  color: _focused ? BatikColors.marun : BatikColors.abuTeks,
                   size: 20,
                 ),
                 counterText: '',
@@ -480,7 +493,7 @@ class _NeonFieldState extends State<_NeonField> {
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: const BorderSide(
-                    color: Color(0xFF1A1A1A),
+                    color: BatikColors.garis,
                     width: 1.5,
                   ),
                 ),
@@ -498,7 +511,7 @@ class _NeonFieldState extends State<_NeonField> {
 }
 
 // ---------------------------------------------------------------------------
-// Neon Button
+// Batik Button (sebelumnya _NeonButton)
 // ---------------------------------------------------------------------------
 
 class _NeonButton extends StatelessWidget {
@@ -527,9 +540,8 @@ class _NeonButton extends StatelessWidget {
           boxShadow: active
               ? [
                   BoxShadow(
-                    color: _neon.withValues(alpha: 0.35),
+                    color: BatikColors.marun.withValues(alpha: 0.25),
                     blurRadius: 20,
-                    spreadRadius: 0,
                     offset: const Offset(0, 4),
                   ),
                 ]
@@ -538,9 +550,9 @@ class _NeonButton extends StatelessWidget {
         child: ElevatedButton(
           onPressed: active ? onPressed : null,
           style: ElevatedButton.styleFrom(
-            backgroundColor: _neon,
-            disabledBackgroundColor: _neon.withValues(alpha: 0.25),
-            foregroundColor: Colors.black,
+            backgroundColor: BatikColors.marun,
+            disabledBackgroundColor: BatikColors.marun.withValues(alpha: 0.25),
+            foregroundColor: Colors.white,
             elevation: 0,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(14),
@@ -552,15 +564,17 @@ class _NeonButton extends StatelessWidget {
                   height: 22,
                   child: CircularProgressIndicator(
                     strokeWidth: 2.5,
-                    color: Colors.black,
+                    color: Colors.white,
                   ),
                 )
               : Text(
                   label,
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.nunitoSans(
                     fontSize: 15,
                     fontWeight: FontWeight.w700,
-                    color: active ? Colors.black : Colors.black45,
+                    color: active
+                        ? Colors.white
+                        : Colors.white.withValues(alpha: 0.6),
                     letterSpacing: 0.3,
                   ),
                 ),

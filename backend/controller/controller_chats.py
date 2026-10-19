@@ -645,7 +645,7 @@ def get_available_models(
     Daftar model Groq yang tersedia — diambil dari config.py secara dinamis.
     """
     models = _get_model_metadata()
-    active_model = CONFIG.get("groq_model", "llama-3.3-70b-versatile")
+    active_model = CONFIG.get("groq_model", "openai/gpt-oss-120b")
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -732,7 +732,7 @@ def get_active_model(
             "success": True,
             "message": "Model aktif berhasil diambil.",
             "data": {
-                "model_id": CONFIG.get("groq_model", "llama-3.3-70b-versatile"),
+                "model_id": CONFIG.get("groq_model", "openai/gpt-oss-120b"),
                 "mode": CONFIG.get("llm_mode", "groq"),
             }
         },

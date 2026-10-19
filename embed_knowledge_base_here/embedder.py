@@ -1,20 +1,4 @@
-# embedder.py
-"""
-Embedder — PDF ingestion pipeline for the RAG knowledge base.
-
-Operating modes:
-  1. IMPORTED — called by main.py when user uploads a PDF
-     → Logging: inherits main.py's configuration (no extra setup)
-     → Context tag: "ingest" → routes to the INGEST panel
-
-  2. STANDALONE — run as `python embedder.py` from CMD
-     → Logging: sets up its own (INFO level, silences noisy libs)
-     → Context tag: "ingest" → still writes to plain stdout
-
-All ingest-phase logs automatically route to the INGEST panel
-thanks to the `log_context("ingest")` context manager.
-"""
-
+import codecs
 import hashlib
 import logging
 import os
@@ -59,6 +43,80 @@ def _reconfigure_stdout_utf8() -> None:
 PARENT_DIR = Path(__file__).resolve().parent.parent
 if str(PARENT_DIR) not in sys.path:
     sys.path.insert(0, str(PARENT_DIR))
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# ENV LOADER (multi-location .env — mirrors the Go launcher)
+# =============================================================================
+
+def _load_env_files() -> Optional[Path]:
+    """
+    Cari .env di beberapa lokasi (cwd, parent, grandparent, PARENT_DIR).
+    Tidak override env yang sudah ada (os.environ.setdefault).
+    Return path .env yang ditemukan, atau None.
+    """
+    candidates: List[Path] = []
+    try:
+        cwd = Path.cwd()
+        candidates += [cwd, cwd.parent, cwd.parent.parent]
+    except Exception:
+        pass
+    candidates.append(PARENT_DIR)
+
+    seen: set = set()
+    for base in candidates:
+        try:
+            envfile = (base / ".env").resolve()
+        except Exception:
+            continue
+        if envfile in seen:
+            continue
+        seen.add(envfile)
+        if envfile.is_file():
+            logger.info("[env] loading %s", envfile)
+            try:
+                for raw in envfile.read_text(encoding="utf-8").splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    # Do not override env yang sudah ada.
+                    os.environ.setdefault(k, v)
+            except Exception as e:
+                logger.warning("[env] failed to read %s: %s", envfile, e)
+                continue
+            return envfile
+    return None
+
+
+# Prefer python-dotenv if available (still respects setdefault semantics
+# via override=False), but always run the manual loader as a fallback.
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+_env_found = _load_env_files()
+if _env_found is None and load_dotenv:
+    # Last resort: let python-dotenv search from cwd.
+    try:
+        load_dotenv(override=False)
+    except Exception:
+        pass
+
+
+# =============================================================================
+# HF_TOKEN SETUP
+# =============================================================================
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
+
 
 # =============================================================================
 # IMPORTS FROM ROOT
@@ -105,38 +163,36 @@ except ImportError:
 
 
 # =============================================================================
-# ENV & HF_TOKEN SETUP (WITH FALLBACK)
-# =============================================================================
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-
-if load_dotenv:
-    root_env_path = PARENT_DIR / ".env"
-    if root_env_path.exists():
-        load_dotenv(dotenv_path=root_env_path)
-    else:
-        load_dotenv()
-
-HF_TOKEN = os.getenv("HF_TOKEN")
-if HF_TOKEN:
-    os.environ["HF_TOKEN"] = HF_TOKEN
-    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
-
-# No print() at module level — HF_TOKEN info is logged in _setup_cli_logging().
-
-logger = logging.getLogger(__name__)
-
-
-# =============================================================================
 # LOAD CONFIGURATION FROM CONFIG.PY
 # =============================================================================
 
-# Neo4j Settings
-NEO4J_URI      = CONFIG.get("neo4j_uri", "neo4j://127.0.0.1:7687")
-NEO4J_USER     = CONFIG.get("neo4j_user", "neo4j")
-NEO4J_PASSWORD = CONFIG.get("neo4j_password", "password")
+# Neo4j Settings — env aliases supported (NEO4J_USER / NEO4J_USERNAME,
+# NEO4J_PASS / NEO4J_PASSWORD). Do NOT hard-fail here; module may be imported
+# by test/dashboard contexts. Fail-fast happens inside Neo4jIngestor()
+# via _require_neo4j_env().
+NEO4J_URI  = os.getenv("NEO4J_URI", "")
+NEO4J_USER = os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME", "")
+NEO4J_PASS = os.getenv("NEO4J_PASS") or os.getenv("NEO4J_PASSWORD", "")
+
+
+def _require_neo4j_env() -> None:
+    """Raise a clear error if any Neo4j env var is missing."""
+    missing = [
+        name
+        for name, value in (
+            ("NEO4J_URI", NEO4J_URI),
+            ("NEO4J_USER (or NEO4J_USERNAME)", NEO4J_USER),
+            ("NEO4J_PASS (or NEO4J_PASSWORD)", NEO4J_PASS),
+        )
+        if not value
+    ]
+    if missing:
+        raise EnvironmentError(
+            "Neo4j environment variables missing: "
+            + ", ".join(missing)
+            + ". Add them to .env (NEO4J_URI, NEO4J_USER, NEO4J_PASS)."
+        )
+
 
 # ChromaDB Settings
 raw_chroma_path = CONFIG.get("chroma_path", "chroma_db")
@@ -480,6 +536,150 @@ def _build_line_dict(words: List[Dict], page_num: int, y_pos: float, page_height
 
 
 # =============================================================================
+# STEP 1b — TXT INGESTION
+# =============================================================================
+#
+# Plain text has no font / position metadata, so we synthesize the same
+# line-dict structure that parse_pdf_to_lines() produces. Headings are found
+# with text patterns and flagged with "heading_hint": True, which
+# score_subheading() honours, so build_isi_nodes() works unchanged for
+# both file types.
+#
+# Recognised headings:
+#   - Markdown          : "# Title", "## Title"
+#   - Numbered          : "1. Pendahuluan", "2.1 Metode", "II. Hasil"
+#   - ALL CAPS          : "ABSTRAK", "DAFTAR PUSTAKA"
+#   - Short + colon     : "Gejala klinis:"
+#   - Underlined        : "Title" followed by "=====" or "-----"
+# A form feed character (\f) is treated as a page break.
+# =============================================================================
+
+_TXT_FONT_SIZE         = 10.0
+_TXT_LINE_STEP         = 12.0   # synthetic y-distance between consecutive lines
+_TXT_HEADING_MAX_LEN   = 60     # pattern-based headings must be short
+
+_TXT_SEPARATOR_RE   = re.compile(r"^[=\-_*~#]{3,}$")
+_TXT_UNDERLINE_RE   = re.compile(r"^(?:={3,}|-{3,})$")
+_TXT_MD_HEADING_RE  = re.compile(r"^#{1,6}\s+(.+?)\s*#*$")
+_TXT_NUMBERED_RE    = re.compile(
+    r"^(?:\d+(?:\.\d+)+[.)]?|\d+[.)]|[IVXLC]+[.)])\s+[A-ZÀ-Ý]"
+)
+
+
+def _read_text_file(txt_path: str) -> str:
+    """Read a text file, tolerating common Windows encodings."""
+    raw = Path(txt_path).read_bytes()
+
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return raw.decode("utf-16").lstrip("\ufeff")
+
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):   # latin-1 never fails
+        try:
+            text = raw.decode(enc)
+            if enc != "utf-8-sig":
+                logger.warning("[TXT] %s is not valid UTF-8 — decoded as %s",
+                               os.path.basename(txt_path), enc)
+            return text
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1", errors="replace")  # unreachable, defensive
+
+
+def _looks_like_txt_heading(text: str) -> bool:
+    """Pattern-based heading guess for a single plain-text line."""
+    if len(text) > _TXT_HEADING_MAX_LEN:
+        return False
+    if _TXT_NUMBERED_RE.match(text) and not text.endswith((".", ";", ",")):
+        return True
+    if len(text) >= 4 and is_all_caps(text) and not text.endswith("."):
+        return True
+    if text.endswith(":") and len(text.split()) <= 8:
+        return True
+    return False
+
+
+def parse_txt_to_lines(txt_path: str) -> List[Dict]:
+    """
+    Parse a .txt file into the same line-dict format as parse_pdf_to_lines().
+    Blank lines become a larger y-gap, so paragraph breaks still contribute
+    to the heading score.
+    """
+    text = _read_text_file(txt_path)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    all_lines: List[Dict] = []
+
+    for page_num, page_text in enumerate(text.split("\f"), start=1):
+        page_lines = page_text.split("\n")
+        total = len(page_lines)
+        y = 0.0
+
+        for i, raw_line in enumerate(page_lines):
+            stripped = raw_line.strip()
+
+            if not stripped:
+                y += _TXT_LINE_STEP          # blank line → paragraph gap
+                continue
+            if _TXT_SEPARATOR_RE.match(stripped):
+                continue                     # "-----", "=====", "#####"
+
+            is_heading = False
+            md = _TXT_MD_HEADING_RE.match(stripped)
+            if md:
+                stripped, is_heading = md.group(1).strip(), True
+            else:
+                nxt = page_lines[i + 1].strip() if i + 1 < total else ""
+                if (
+                    _TXT_UNDERLINE_RE.match(nxt)
+                    and len(stripped) <= _TXT_HEADING_MAX_LEN
+                    and not stripped.endswith(".")
+                ):
+                    is_heading = True
+                else:
+                    is_heading = _looks_like_txt_heading(stripped)
+
+            y += _TXT_LINE_STEP
+            all_lines.append({
+                "text":        stripped,
+                "page":        page_num,
+                "font_size":   _TXT_FONT_SIZE,
+                "is_bold":     False,
+                "heading_hint": is_heading,
+                "y_position":  y,
+                "page_height": 0.0,          # 0 disables the footer penalty
+            })
+
+    return all_lines
+
+
+# =============================================================================
+# FILE-TYPE DISPATCH
+# =============================================================================
+
+_PARSERS = {
+    ".pdf": parse_pdf_to_lines,
+    ".txt": parse_txt_to_lines,
+}
+SUPPORTED_EXTENSIONS = tuple(_PARSERS)
+
+
+def is_supported_file(file_path: str) -> bool:
+    return Path(file_path).suffix.lower() in _PARSERS
+
+
+def parse_document_to_lines(file_path: str) -> List[Dict]:
+    """Pick the right parser based on the file extension."""
+    ext    = Path(file_path).suffix.lower()
+    parser = _PARSERS.get(ext)
+    if parser is None:
+        raise ValueError(
+            f"Unsupported file type '{ext}' for {os.path.basename(file_path)} "
+            f"(supported: {', '.join(SUPPORTED_EXTENSIONS)})"
+        )
+    return parser(file_path)
+
+
+# =============================================================================
 # STEP 2 — REMOVE BOILERPLATE
 # =============================================================================
 
@@ -579,6 +779,11 @@ def score_subheading(
     page_height = line.get("page_height", 0)
     if page_height > 0 and line["y_position"] > (page_height * 0.9):
         score -= 1
+
+    # TXT files carry no font/bold metadata — parse_txt_to_lines() sets an
+    # explicit hint instead, which guarantees the line passes the threshold.
+    if line.get("heading_hint"):
+        return max(score, SUBHEADING_SCORE_THRESHOLD)
 
     return score
 
@@ -706,9 +911,17 @@ def build_isi_nodes(lines: List[Dict], jurnal_id: str) -> List[IsiNode]:
 # =============================================================================
 
 class Neo4jIngestor:
-    def __init__(self, uri: str = NEO4J_URI, user: str = NEO4J_USER, password: str = NEO4J_PASSWORD):
+    def __init__(
+        self,
+        uri: str = NEO4J_URI,
+        user: str = NEO4J_USER,
+        password: str = NEO4J_PASS,
+    ):
+        if not uri or not user or not password:
+            _require_neo4j_env()
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
-        logger.info("Neo4j connected: %s", uri)
+        self.driver.verify_connectivity()
+        logger.info("Neo4j connected: %s (user=%s)", uri, user)
 
     def close(self):
         self.driver.close()
@@ -908,9 +1121,9 @@ def run_pipeline(
             return None
 
         # ── Step 2: Parse PDF ───────────────────────────────────────
-        step_start("ingest", "parse", "Parse PDF")
+        step_start("ingest", "parse", f"Parse {Path(pdf_path).suffix.lstrip('.').upper() or 'file'}")
         _t = time.perf_counter()
-        lines = parse_pdf_to_lines(pdf_path)
+        lines = parse_document_to_lines(pdf_path)   # PDF or TXT (by extension)
         lines = clean_lines(lines)
         step_done("ingest", "parse", time.perf_counter() - _t)
 
@@ -1129,9 +1342,9 @@ def run_pipeline_raw(
             return None
 
         # ── Step 2: Parse PDF ───────────────────────────────────────
-        step_start("ingest", "parse", "Parse PDF")
+        step_start("ingest", "parse", f"Parse {Path(pdf_path).suffix.lstrip('.').upper() or 'file'}")
         _t = time.perf_counter()
-        lines = parse_pdf_to_lines(pdf_path)
+        lines = parse_document_to_lines(pdf_path)   # PDF or TXT (by extension)
         lines = clean_lines(lines)
         step_done("ingest", "parse", time.perf_counter() - _t)
 
@@ -1154,7 +1367,10 @@ def run_pipeline_raw(
 
         safe_chunks: List[str] = []
         try:
-            _raw_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+            _require_neo4j_env()
+            _raw_driver = GraphDatabase.driver(
+                NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS)
+            )
             try:
                 _raw_driver.verify_connectivity()
                 suspicious = scan_chunks_against_instructions(chunks, _raw_driver, lang="id")
@@ -1249,7 +1465,7 @@ def run_pipeline_with_shared_resources(
         rag_models  = pipeline.models
 
         # P1: use the pipeline's Chroma client (shared, not a new one)
-        neo4j  = Neo4jIngestor(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD)
+        neo4j  = Neo4jIngestor(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASS)
         chroma = ChromaIngestor(client=pipeline.chroma.client)
         try:
             return run_pipeline(pdf_path, jurnal_metadata, rag_models, neo4j, chroma)
@@ -1329,21 +1545,33 @@ def main():
     global MAX_TOKENS_PER_CHUNK
     import argparse
 
-    parser = argparse.ArgumentParser(description="Disease Journal PDF Embedder")
+    parser = argparse.ArgumentParser(description="Disease Journal Embedder (PDF / TXT)")
     parser.add_argument("--dataset",         default=DATASET_PATH)
     parser.add_argument("--chroma",          default=CHROMA_PATH)
     parser.add_argument("--neo4j-uri",       default=NEO4J_URI)
     parser.add_argument("--neo4j-user",      default=NEO4J_USER)
-    parser.add_argument("--neo4j-password",  default=NEO4J_PASSWORD)
-    parser.add_argument("--file",            help="Process a single PDF")
+    parser.add_argument(
+        "--neo4j-password",
+        default=NEO4J_PASS,
+        help="Override NEO4J_PASS / NEO4J_PASSWORD from .env",
+    )
+    parser.add_argument("--file",            help="Process a single file (.pdf or .txt)")
     parser.add_argument("--max-tokens",      type=int, default=MAX_TOKENS_PER_CHUNK)
     args = parser.parse_args()
 
     MAX_TOKENS_PER_CHUNK = args.max_tokens
 
+    # Fail-fast Neo4j env check with a friendly message (same shape as Go launcher)
+    try:
+        _require_neo4j_env()
+    except EnvironmentError as e:
+        logger.error("neo4j FAIL: %s", e)
+        sys.exit(1)
+
     logger.info("Dataset path : %s", args.dataset)
     logger.info("ChromaDB path: %s", args.chroma)
     logger.info("Neo4j URI    : %s", args.neo4j_uri)
+    logger.info("Neo4j user   : %s", args.neo4j_user)
 
     # P2: use embedding_only=True — no reranker/Groq/NLP needed.
     #     This avoids EnvironmentError when GROQ_API_KEY is not set.
@@ -1364,40 +1592,50 @@ def main():
     chroma = ChromaIngestor(persist_directory=args.chroma)
 
     if args.file:
-        pdf_files = [Path(args.file)]
+        doc_files = [Path(args.file)]
+        if not is_supported_file(args.file):
+            logger.error(
+                "Unsupported file type: %s (supported: %s)",
+                args.file, ", ".join(SUPPORTED_EXTENSIONS),
+            )
+            neo4j.close()
+            return
     else:
         dataset_path = Path(args.dataset)
         if not dataset_path.exists():
             logger.error("Dataset path not found: %s", dataset_path)
             neo4j.close()
             return
-        pdf_files = list(dataset_path.glob("**/*.pdf"))
+        doc_files = sorted(
+            p for p in dataset_path.rglob("*")
+            if p.is_file() and is_supported_file(str(p))
+        )
 
-    if not pdf_files:
-        logger.warning("No PDF files found!")
+    if not doc_files:
+        logger.warning("No supported files (%s) found!", ", ".join(SUPPORTED_EXTENSIONS))
         neo4j.close()
         return
 
-    logger.info("Found %d PDF file(s) to process", len(pdf_files))
+    logger.info("Found %d file(s) to process", len(doc_files))
 
     all_results   = []
     skipped_files = 0
 
-    for pdf_file in pdf_files:
+    for doc_file in doc_files:
         try:
             jurnal_metadata = {
-                "judul":         pdf_file.stem,
+                "judul":         doc_file.stem,
                 "doi":           None,
                 "penulis":       "Unknown Author",
                 "tanggal_rilis": "2024",
             }
-            result = run_pipeline(str(pdf_file), jurnal_metadata, rag_models, neo4j, chroma)
+            result = run_pipeline(str(doc_file), jurnal_metadata, rag_models, neo4j, chroma)
             if result:
                 all_results.append(result)
             else:
                 skipped_files += 1
         except Exception as e:
-            logger.exception("Error processing %s", pdf_file)
+            logger.exception("Error processing %s", doc_file)
 
     neo4j.close()
 

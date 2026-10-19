@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:frontend/chats/service_chats.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:frontend/chats/batik_theme.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:frontend/services/token_storage.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
@@ -223,10 +224,10 @@ class _InputBarState extends State<InputBar> {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDS) => Dialog(
-          backgroundColor: const Color(0xFF111111),
+          backgroundColor: BatikColors.putih,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: Color(0xFF1A1A1A)),
+            side: const BorderSide(color: BatikColors.garis),
           ),
           child: Container(
             width: isMobile ? double.infinity : 360,
@@ -241,12 +242,12 @@ class _InputBarState extends State<InputBar> {
                       width: 36,
                       height: 36,
                       decoration: BoxDecoration(
-                        color: const Color(0xFF16DB65).withValues(alpha: 0.12),
+                        color: BatikColors.marun.withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: const Icon(
                         Icons.tune_rounded,
-                        color: Color(0xFF16DB65),
+                        color: BatikColors.marun,
                         size: 18,
                       ),
                     ),
@@ -254,10 +255,10 @@ class _InputBarState extends State<InputBar> {
                     Expanded(
                       child: Text(
                         'Mode RAG',
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 15,
                           fontWeight: FontWeight.w600,
-                          color: Colors.white,
+                          color: BatikColors.sogaGelap,
                         ),
                       ),
                     ),
@@ -265,7 +266,7 @@ class _InputBarState extends State<InputBar> {
                       onTap: () => Navigator.of(ctx).pop(),
                       child: const Icon(
                         Icons.close_rounded,
-                        color: Color(0xFF666666),
+                        color: BatikColors.abuTeks,
                         size: 20,
                       ),
                     ),
@@ -274,9 +275,9 @@ class _InputBarState extends State<InputBar> {
                 const SizedBox(height: 6),
                 Text(
                   'Pilih metode retrieval untuk menjawab pertanyaan teknis',
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.nunitoSans(
                     fontSize: 11,
-                    color: const Color(0xFF888888),
+                    color: BatikColors.abuTeks,
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -314,9 +315,9 @@ class _InputBarState extends State<InputBar> {
                         ),
                         child: Text(
                           'Batal',
-                          style: GoogleFonts.poppins(
+                          style: GoogleFonts.nunitoSans(
                             fontSize: 13,
-                            color: const Color(0xFF888888),
+                            color: BatikColors.abuTeks,
                           ),
                         ),
                       ),
@@ -345,7 +346,7 @@ class _InputBarState extends State<InputBar> {
                                               ? 'Mode RAG: Improved (Neo4j + context)'
                                               : 'Mode RAG: Regular (Simple retrieval)',
                                         ),
-                                        backgroundColor: const Color(0xFF16DB65),
+                                        backgroundColor: BatikColors.hijau,
                                         duration: const Duration(seconds: 2),
                                       ),
                                     );
@@ -354,7 +355,7 @@ class _InputBarState extends State<InputBar> {
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       const SnackBar(
                                         content: Text('Gagal mengganti mode RAG'),
-                                        backgroundColor: Colors.red,
+                                        backgroundColor: BatikColors.marun,
                                       ),
                                     );
                                   }
@@ -364,15 +365,15 @@ class _InputBarState extends State<InputBar> {
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       SnackBar(
                                         content: Text('Error: $e'),
-                                        backgroundColor: Colors.red,
+                                        backgroundColor: BatikColors.marun,
                                       ),
                                     );
                                   }
                                 }
                               },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF16DB65),
-                          disabledBackgroundColor: const Color(0xFF1E1E1E),
+                          backgroundColor: BatikColors.marun,
+                          disabledBackgroundColor: BatikColors.krem,
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(10),
@@ -381,12 +382,12 @@ class _InputBarState extends State<InputBar> {
                         ),
                         child: Text(
                           'Terapkan',
-                          style: GoogleFonts.poppins(
+                          style: GoogleFonts.nunitoSans(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
                             color: selectedMode == _ragMode
-                                ? const Color(0xFF555555)
-                                : Colors.black,
+                                ? BatikColors.abuTeks
+                                : Colors.white,
                           ),
                         ),
                       ),
@@ -411,8 +412,8 @@ class _InputBarState extends State<InputBar> {
   }) {
     final isSelected = selectedMode == mode;
     final Color accent = mode == 'improved' 
-        ? const Color(0xFF16DB65) 
-        : const Color(0xFFFFAA33);
+        ? BatikColors.marun 
+        : BatikColors.sogaMuda;
 
     return InkWell(
       borderRadius: BorderRadius.circular(12),
@@ -421,10 +422,10 @@ class _InputBarState extends State<InputBar> {
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: isSelected ? accent.withValues(alpha: 0.08) : const Color(0xFF151515),
+          color: isSelected ? accent.withValues(alpha: 0.08) : BatikColors.kertas,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: isSelected ? accent.withValues(alpha: 0.5) : const Color(0xFF222222),
+            color: isSelected ? accent.withValues(alpha: 0.5) : BatikColors.garis,
             width: isSelected ? 1.5 : 1,
           ),
         ),
@@ -434,13 +435,13 @@ class _InputBarState extends State<InputBar> {
               width: 40,
               height: 40,
               decoration: BoxDecoration(
-                color: isSelected ? accent.withValues(alpha: 0.15) : const Color(0xFF1A1A1A),
+                color: isSelected ? accent.withValues(alpha: 0.15) : BatikColors.krem,
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Icon(
                 icon,
                 size: 20,
-                color: isSelected ? accent : const Color(0xFF666666),
+                color: isSelected ? accent : BatikColors.abuTeks,
               ),
             ),
             const SizedBox(width: 12),
@@ -450,18 +451,18 @@ class _InputBarState extends State<InputBar> {
                 children: [
                   Text(
                     title,
-                    style: GoogleFonts.poppins(
+                    style: GoogleFonts.nunitoSans(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
-                      color: isSelected ? Colors.white : const Color(0xFFAAAAAA),
+                      color: isSelected ? BatikColors.sogaGelap : BatikColors.abuTeks,
                     ),
                   ),
                   const SizedBox(height: 2),
                   Text(
                     description,
-                    style: GoogleFonts.poppins(
+                    style: GoogleFonts.nunitoSans(
                       fontSize: 10.5,
-                      color: const Color(0xFF555555),
+                      color: BatikColors.abuTeks,
                     ),
                   ),
                 ],
@@ -478,7 +479,7 @@ class _InputBarState extends State<InputBar> {
                 child: const Icon(
                   Icons.check_rounded,
                   size: 12,
-                  color: Colors.black,
+                  color: Colors.white,
                 ),
               ),
           ],
@@ -516,10 +517,10 @@ class _InputBarState extends State<InputBar> {
           }
 
           return Dialog(
-            backgroundColor: const Color(0xFF111111),
+            backgroundColor: BatikColors.putih,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(16),
-              side: const BorderSide(color: Color(0xFF1A1A1A)),
+              side: const BorderSide(color: BatikColors.garis),
             ),
             child: Container(
               width: isMobile ? double.infinity : 420,
@@ -539,12 +540,12 @@ class _InputBarState extends State<InputBar> {
                           width: 36,
                           height: 36,
                           decoration: BoxDecoration(
-                            color: const Color(0xFF16DB65).withValues(alpha: 0.12),
+                            color: BatikColors.marun.withValues(alpha: 0.12),
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: const Icon(
                             Icons.auto_awesome_rounded,
-                            color: Color(0xFF16DB65),
+                            color: BatikColors.marun,
                             size: 18,
                           ),
                         ),
@@ -555,17 +556,17 @@ class _InputBarState extends State<InputBar> {
                             children: [
                               Text(
                                 'Pilih Model',
-                                style: GoogleFonts.poppins(
+                                style: GoogleFonts.nunitoSans(
                                   fontSize: isMobile ? 14 : 15,
                                   fontWeight: FontWeight.w600,
-                                  color: Colors.white,
+                                  color: BatikColors.sogaGelap,
                                 ),
                               ),
                               Text(
                                 'Semua model berjalan via Groq API',
-                                style: GoogleFonts.poppins(
+                                style: GoogleFonts.nunitoSans(
                                   fontSize: 10.5,
-                                  color: const Color(0xFF555555),
+                                  color: BatikColors.abuTeks,
                                 ),
                               ),
                             ],
@@ -575,7 +576,7 @@ class _InputBarState extends State<InputBar> {
                           onTap: () => Navigator.of(ctx).pop(),
                           child: const Icon(
                             Icons.close_rounded,
-                            color: Color(0xFF666666),
+                            color: BatikColors.abuTeks,
                             size: 20,
                           ),
                         ),
@@ -586,7 +587,7 @@ class _InputBarState extends State<InputBar> {
                       child: loadingModels
                           ? const Center(
                               child: CircularProgressIndicator(
-                                color: Color(0xFF16DB65),
+                                color: BatikColors.marun,
                                 strokeWidth: 2,
                               ),
                             )
@@ -594,9 +595,9 @@ class _InputBarState extends State<InputBar> {
                           ? Center(
                               child: Text(
                                 'Gagal memuat daftar model.',
-                                style: GoogleFonts.poppins(
+                                style: GoogleFonts.nunitoSans(
                                   fontSize: 12,
-                                  color: const Color(0xFF666666),
+                                  color: BatikColors.abuTeks,
                                 ),
                               ),
                             )
@@ -615,10 +616,10 @@ class _InputBarState extends State<InputBar> {
                                 final isSelected = selectedId == id;
 
                                 final Color accent = id.startsWith('mistral')
-                                    ? const Color(0xFF6C8EFF)
+                                    ? BatikColors.nila
                                     : id.startsWith('qwen')
-                                    ? const Color(0xFFFF8C42)
-                                    : const Color(0xFF16DB65);
+                                    ? BatikColors.sogaMuda
+                                    : BatikColors.marun;
 
                                 final String tierLabel = tier == 'small'
                                     ? 'Ringan'
@@ -626,10 +627,10 @@ class _InputBarState extends State<InputBar> {
                                     ? 'Sedang'
                                     : 'Kuat';
                                 final Color tierColor = tier == 'small'
-                                    ? const Color(0xFF16DB65)
+                                    ? BatikColors.hijau
                                     : tier == 'medium'
-                                    ? const Color(0xFFFFAA33)
-                                    : const Color(0xFFFF6B6B);
+                                    ? BatikColors.sogaMuda
+                                    : BatikColors.marunGelap;
 
                                 return InkWell(
                                   borderRadius: BorderRadius.circular(12),
@@ -643,12 +644,12 @@ class _InputBarState extends State<InputBar> {
                                     decoration: BoxDecoration(
                                       color: isSelected
                                           ? accent.withValues(alpha: 0.08)
-                                          : const Color(0xFF151515),
+                                          : BatikColors.kertas,
                                       borderRadius: BorderRadius.circular(12),
                                       border: Border.all(
                                         color: isSelected
                                             ? accent.withValues(alpha: 0.5)
-                                            : const Color(0xFF222222),
+                                            : BatikColors.garis,
                                         width: isSelected ? 1.5 : 1,
                                       ),
                                     ),
@@ -660,7 +661,7 @@ class _InputBarState extends State<InputBar> {
                                           decoration: BoxDecoration(
                                             color: isSelected
                                                 ? accent.withValues(alpha: 0.15)
-                                                : const Color(0xFF1A1A1A),
+                                                : BatikColors.krem,
                                             borderRadius: BorderRadius.circular(8),
                                           ),
                                           child: Icon(
@@ -668,7 +669,7 @@ class _InputBarState extends State<InputBar> {
                                             size: 17,
                                             color: isSelected
                                                 ? accent
-                                                : const Color(0xFF666666),
+                                                : BatikColors.abuTeks,
                                           ),
                                         ),
                                         const SizedBox(width: 12),
@@ -681,12 +682,12 @@ class _InputBarState extends State<InputBar> {
                                                   Expanded(
                                                     child: Text(
                                                       name,
-                                                      style: GoogleFonts.poppins(
+                                                      style: GoogleFonts.nunitoSans(
                                                         fontSize: 13,
                                                         fontWeight: FontWeight.w600,
                                                         color: isSelected
-                                                            ? Colors.white
-                                                            : const Color(0xFFAAAAAA),
+                                                            ? BatikColors.sogaGelap
+                                                            : BatikColors.abuTeks,
                                                       ),
                                                     ),
                                                   ),
@@ -701,7 +702,7 @@ class _InputBarState extends State<InputBar> {
                                                     ),
                                                     child: Text(
                                                       tierLabel,
-                                                      style: GoogleFonts.poppins(
+                                                      style: GoogleFonts.nunitoSans(
                                                         fontSize: 9.5,
                                                         color: tierColor,
                                                         fontWeight: FontWeight.w600,
@@ -713,18 +714,18 @@ class _InputBarState extends State<InputBar> {
                                               const SizedBox(height: 2),
                                               Text(
                                                 provider,
-                                                style: GoogleFonts.poppins(
+                                                style: GoogleFonts.nunitoSans(
                                                   fontSize: 10.5,
-                                                  color: const Color(0xFF555555),
+                                                  color: BatikColors.abuTeks,
                                                 ),
                                               ),
                                               if (desc.isNotEmpty) ...[
                                                 const SizedBox(height: 3),
                                                 Text(
                                                   desc,
-                                                  style: GoogleFonts.poppins(
+                                                  style: GoogleFonts.nunitoSans(
                                                     fontSize: 10,
-                                                    color: const Color(0xFF444444),
+                                                    color: BatikColors.abuTeks,
                                                   ),
                                                   maxLines: 2,
                                                   overflow: TextOverflow.ellipsis,
@@ -745,7 +746,7 @@ class _InputBarState extends State<InputBar> {
                                             child: const Icon(
                                               Icons.check_rounded,
                                               size: 12,
-                                              color: Colors.black,
+                                              color: Colors.white,
                                             ),
                                           ),
                                       ],
@@ -769,9 +770,9 @@ class _InputBarState extends State<InputBar> {
                             ),
                             child: Text(
                               'Batal',
-                              style: GoogleFonts.poppins(
+                              style: GoogleFonts.nunitoSans(
                                 fontSize: 13,
-                                color: const Color(0xFF888888),
+                                color: BatikColors.abuTeks,
                               ),
                             ),
                           ),
@@ -803,15 +804,15 @@ class _InputBarState extends State<InputBar> {
                                         ScaffoldMessenger.of(context).showSnackBar(
                                           SnackBar(
                                             content: Text('Gagal mengganti model: $e'),
-                                            backgroundColor: Colors.red,
+                                            backgroundColor: BatikColors.marun,
                                           ),
                                         );
                                       }
                                     }
                                   },
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF16DB65),
-                              disabledBackgroundColor: const Color(0xFF1E1E1E),
+                              backgroundColor: BatikColors.marun,
+                              disabledBackgroundColor: BatikColors.krem,
                               padding: const EdgeInsets.symmetric(vertical: 12),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(10),
@@ -820,12 +821,12 @@ class _InputBarState extends State<InputBar> {
                             ),
                             child: Text(
                               'Terapkan',
-                              style: GoogleFonts.poppins(
+                              style: GoogleFonts.nunitoSans(
                                 fontSize: 13,
                                 fontWeight: FontWeight.w600,
                                 color: selectedId == _activeModelId
-                                    ? const Color(0xFF555555)
-                                    : Colors.black,
+                                    ? BatikColors.abuTeks
+                                    : Colors.white,
                               ),
                             ),
                           ),
@@ -919,10 +920,10 @@ class _InputBarState extends State<InputBar> {
           final hasFiles = selectedFiles.isNotEmpty;
 
           return Dialog(
-            backgroundColor: const Color(0xFF111111),
+            backgroundColor: BatikColors.putih,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(16),
-              side: const BorderSide(color: Color(0xFF1A1A1A)),
+              side: const BorderSide(color: BatikColors.garis),
             ),
             child: ConstrainedBox(
               constraints: BoxConstraints(
@@ -941,12 +942,12 @@ class _InputBarState extends State<InputBar> {
                           width: 36,
                           height: 36,
                           decoration: BoxDecoration(
-                            color: const Color(0xFF16DB65).withValues(alpha: 0.12),
+                            color: BatikColors.marun.withValues(alpha: 0.12),
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: const Icon(
                             Icons.auto_stories_rounded,
-                            color: Color(0xFF16DB65),
+                            color: BatikColors.marun,
                             size: 18,
                           ),
                         ),
@@ -954,10 +955,10 @@ class _InputBarState extends State<InputBar> {
                         Expanded(
                           child: Text(
                             'Tambah Pengetahuan Bot',
-                            style: GoogleFonts.poppins(
+                            style: GoogleFonts.nunitoSans(
                               fontSize: 15,
                               fontWeight: FontWeight.w600,
-                              color: Colors.white,
+                              color: BatikColors.sogaGelap,
                             ),
                           ),
                         ),
@@ -966,7 +967,7 @@ class _InputBarState extends State<InputBar> {
                             onTap: () => Navigator.of(ctx).pop(),
                             child: const Icon(
                               Icons.close_rounded,
-                              color: Color(0xFF666666),
+                              color: BatikColors.abuTeks,
                               size: 20,
                             ),
                           ),
@@ -975,9 +976,9 @@ class _InputBarState extends State<InputBar> {
                     const SizedBox(height: 6),
                     Text(
                       'Pilih satu atau beberapa file PDF sekaligus',
-                      style: GoogleFonts.poppins(
+                      style: GoogleFonts.nunitoSans(
                         fontSize: 12,
-                        color: const Color(0xFFA3A3A3),
+                        color: BatikColors.abuTeks,
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -985,9 +986,9 @@ class _InputBarState extends State<InputBar> {
                     // ── Pilihan Embedder ──────────────────────────────────
                     Container(
                       decoration: BoxDecoration(
-                        color: const Color(0xFF0D0D0D),
+                        color: BatikColors.kertas,
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: const Color(0xFF2A2A2A)),
+                        border: Border.all(color: BatikColors.garis),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -999,21 +1000,21 @@ class _InputBarState extends State<InputBar> {
                                 const Icon(
                                   Icons.tune_rounded,
                                   size: 14,
-                                  color: Color(0xFF16DB65),
+                                  color: BatikColors.marun,
                                 ),
                                 const SizedBox(width: 6),
                                 Text(
                                   'Mode Embedder',
-                                  style: GoogleFonts.poppins(
+                                  style: GoogleFonts.nunitoSans(
                                     fontSize: 11.5,
                                     fontWeight: FontWeight.w600,
-                                    color: const Color(0xFF16DB65),
+                                    color: BatikColors.marun,
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                          const Divider(height: 1, color: Color(0xFF1E1E1E)),
+                          const Divider(height: 1, color: BatikColors.garis),
                           // Improved option
                           InkWell(
                             onTap: isUploading
@@ -1036,19 +1037,19 @@ class _InputBarState extends State<InputBar> {
                                       shape: BoxShape.circle,
                                       border: Border.all(
                                         color: embedderType == 'improved'
-                                            ? const Color(0xFF16DB65)
-                                            : const Color(0xFF444444),
+                                            ? BatikColors.marun
+                                            : BatikColors.abuTeks,
                                         width: 2,
                                       ),
                                       color: embedderType == 'improved'
-                                          ? const Color(0xFF16DB65)
+                                          ? BatikColors.marun
                                           : Colors.transparent,
                                     ),
                                     child: embedderType == 'improved'
                                         ? const Icon(
                                             Icons.check,
                                             size: 10,
-                                            color: Colors.black,
+                                            color: Colors.white,
                                           )
                                         : null,
                                   ),
@@ -1060,19 +1061,19 @@ class _InputBarState extends State<InputBar> {
                                       children: [
                                         Text(
                                           'Improved Embedder',
-                                          style: GoogleFonts.poppins(
+                                          style: GoogleFonts.nunitoSans(
                                             fontSize: 12,
                                             fontWeight: FontWeight.w600,
                                             color: embedderType == 'improved'
-                                                ? Colors.white
-                                                : const Color(0xFF888888),
+                                                ? BatikColors.sogaGelap
+                                                : BatikColors.abuTeks,
                                           ),
                                         ),
                                         Text(
                                           'Akurasi lebih tinggi',
-                                          style: GoogleFonts.poppins(
+                                          style: GoogleFonts.nunitoSans(
                                             fontSize: 10,
-                                            color: const Color(0xFF555555),
+                                            color: BatikColors.abuTeks,
                                           ),
                                         ),
                                       ],
@@ -1082,7 +1083,7 @@ class _InputBarState extends State<InputBar> {
                               ),
                             ),
                           ),
-                          const Divider(height: 1, color: Color(0xFF1A1A1A)),
+                          const Divider(height: 1, color: BatikColors.garis),
                           // Raw option
                           InkWell(
                             onTap: isUploading
@@ -1105,19 +1106,19 @@ class _InputBarState extends State<InputBar> {
                                       shape: BoxShape.circle,
                                       border: Border.all(
                                         color: embedderType == 'raw'
-                                            ? const Color(0xFFFFAA33)
-                                            : const Color(0xFF444444),
+                                            ? BatikColors.sogaMuda
+                                            : BatikColors.abuTeks,
                                         width: 2,
                                       ),
                                       color: embedderType == 'raw'
-                                          ? const Color(0xFFFFAA33)
+                                          ? BatikColors.sogaMuda
                                           : Colors.transparent,
                                     ),
                                     child: embedderType == 'raw'
                                         ? const Icon(
                                             Icons.check,
                                             size: 10,
-                                            color: Colors.black,
+                                            color: Colors.white,
                                           )
                                         : null,
                                   ),
@@ -1129,19 +1130,19 @@ class _InputBarState extends State<InputBar> {
                                       children: [
                                         Text(
                                           'Raw Embedder',
-                                          style: GoogleFonts.poppins(
+                                          style: GoogleFonts.nunitoSans(
                                             fontSize: 12,
                                             fontWeight: FontWeight.w600,
                                             color: embedderType == 'raw'
-                                                ? Colors.white
-                                                : const Color(0xFF888888),
+                                                ? BatikColors.sogaGelap
+                                                : BatikColors.abuTeks,
                                           ),
                                         ),
                                         Text(
                                           'Embed teks mentah langsung',
-                                          style: GoogleFonts.poppins(
+                                          style: GoogleFonts.nunitoSans(
                                             fontSize: 10,
-                                            color: const Color(0xFF555555),
+                                            color: BatikColors.abuTeks,
                                           ),
                                         ),
                                       ],
@@ -1164,12 +1165,12 @@ class _InputBarState extends State<InputBar> {
                           horizontal: 16,
                         ),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF0D0D0D),
+                          color: BatikColors.kertas,
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
                             color: hasFiles
-                                ? const Color(0xFF16DB65).withValues(alpha: 0.4)
-                                : const Color(0xFF2A2A2A),
+                                ? BatikColors.marun.withValues(alpha: 0.4)
+                                : BatikColors.garis,
                             width: hasFiles ? 1.5 : 1,
                           ),
                         ),
@@ -1181,8 +1182,8 @@ class _InputBarState extends State<InputBar> {
                                   ? Icons.picture_as_pdf_rounded
                                   : Icons.upload_file_rounded,
                               color: hasFiles
-                                  ? const Color(0xFF16DB65)
-                                  : const Color(0xFF555555),
+                                  ? BatikColors.marun
+                                  : BatikColors.abuTeks,
                               size: 32,
                             ),
                             const SizedBox(height: 8),
@@ -1190,12 +1191,12 @@ class _InputBarState extends State<InputBar> {
                               hasFiles
                                   ? 'Ketuk untuk menambah lebih banyak file'
                                   : 'Ketuk untuk memilih file PDF',
-                              style: GoogleFonts.poppins(
+                              style: GoogleFonts.nunitoSans(
                                 fontSize: 13,
                                 fontWeight: FontWeight.w500,
                                 color: hasFiles
-                                    ? const Color(0xFF16DB65)
-                                    : const Color(0xFF888888),
+                                    ? BatikColors.marun
+                                    : BatikColors.abuTeks,
                               ),
                             ),
                           ],
@@ -1212,9 +1213,9 @@ class _InputBarState extends State<InputBar> {
                             children: [
                               Text(
                                 'Mengunggah $uploadDone dari ${selectedFiles.length} file...',
-                                style: GoogleFonts.poppins(
+                                style: GoogleFonts.nunitoSans(
                                   fontSize: 12,
-                                  color: const Color(0xFF16DB65),
+                                  color: BatikColors.marun,
                                 ),
                               ),
                               const SizedBox(height: 6),
@@ -1222,8 +1223,8 @@ class _InputBarState extends State<InputBar> {
                                 value: selectedFiles.isEmpty
                                     ? 0
                                     : uploadDone / selectedFiles.length,
-                                backgroundColor: const Color(0xFF1A1A1A),
-                                color: const Color(0xFF16DB65),
+                                backgroundColor: BatikColors.garis,
+                                color: BatikColors.marun,
                                 borderRadius: BorderRadius.circular(4),
                               ),
                             ],
@@ -1244,12 +1245,12 @@ class _InputBarState extends State<InputBar> {
                                 vertical: 8,
                               ),
                               decoration: BoxDecoration(
-                                color: const Color(0xFF0D0D0D),
+                                color: BatikColors.kertas,
                                 borderRadius: BorderRadius.circular(8),
                                 border: Border.all(
                                   color: isDone
-                                      ? const Color(0xFF16DB65).withValues(alpha: 0.4)
-                                      : const Color(0xFF1E1E1E),
+                                      ? BatikColors.marun.withValues(alpha: 0.4)
+                                      : BatikColors.garis,
                                 ),
                               ),
                               child: Row(
@@ -1260,18 +1261,18 @@ class _InputBarState extends State<InputBar> {
                                         : Icons.picture_as_pdf_rounded,
                                     size: 16,
                                     color: isDone
-                                        ? const Color(0xFF16DB65)
-                                        : const Color(0xFF888888),
+                                        ? BatikColors.marun
+                                        : BatikColors.abuTeks,
                                   ),
                                   const SizedBox(width: 8),
                                   Expanded(
                                     child: Text(
                                       f.name,
-                                      style: GoogleFonts.poppins(
+                                      style: GoogleFonts.nunitoSans(
                                         fontSize: 12,
                                         color: isDone
-                                            ? const Color(0xFF16DB65)
-                                            : Colors.white,
+                                            ? BatikColors.marun
+                                            : BatikColors.sogaGelap,
                                       ),
                                       overflow: TextOverflow.ellipsis,
                                     ),
@@ -1279,9 +1280,9 @@ class _InputBarState extends State<InputBar> {
                                   const SizedBox(width: 4),
                                   Text(
                                     '${(f.bytes.length / 1024).toStringAsFixed(0)} KB',
-                                    style: GoogleFonts.poppins(
+                                    style: GoogleFonts.nunitoSans(
                                       fontSize: 11,
-                                      color: const Color(0xFF555555),
+                                      color: BatikColors.abuTeks,
                                     ),
                                   ),
                                   if (!isUploading) ...[
@@ -1291,7 +1292,7 @@ class _InputBarState extends State<InputBar> {
                                       child: const Icon(
                                         Icons.close_rounded,
                                         size: 14,
-                                        color: Color(0xFF555555),
+                                        color: BatikColors.abuTeks,
                                       ),
                                     ),
                                   ],
@@ -1316,11 +1317,11 @@ class _InputBarState extends State<InputBar> {
                             ),
                             child: Text(
                               'Batal',
-                              style: GoogleFonts.poppins(
+                              style: GoogleFonts.nunitoSans(
                                 fontSize: 13,
                                 color: isUploading
-                                    ? const Color(0xFF444444)
-                                    : const Color(0xFF888888),
+                                    ? BatikColors.abuTeks
+                                    : BatikColors.abuTeks,
                               ),
                             ),
                           ),
@@ -1331,8 +1332,9 @@ class _InputBarState extends State<InputBar> {
                             onPressed: (hasFiles && !isUploading) ? doUpload : null,
                             style: ElevatedButton.styleFrom(
                               backgroundColor: (hasFiles && !isUploading)
-                                  ? const Color(0xFF16DB65)
-                                  : const Color(0xFF1A1A1A),
+                                  ? BatikColors.marun
+                                  : BatikColors.krem,
+                              disabledBackgroundColor: BatikColors.krem,
                               padding: const EdgeInsets.symmetric(vertical: 12),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(10),
@@ -1345,19 +1347,19 @@ class _InputBarState extends State<InputBar> {
                                     height: 16,
                                     child: CircularProgressIndicator(
                                       strokeWidth: 2,
-                                      color: Colors.black,
+                                      color: Colors.white,
                                     ),
                                   )
                                 : Text(
                                     hasFiles
                                         ? 'Unggah (${selectedFiles.length})'
                                         : 'Unggah',
-                                    style: GoogleFonts.poppins(
+                                    style: GoogleFonts.nunitoSans(
                                       fontSize: 13,
                                       fontWeight: FontWeight.w600,
                                       color: (hasFiles && !isUploading)
-                                          ? Colors.black
-                                          : const Color(0xFF555555),
+                                          ? Colors.white
+                                          : BatikColors.abuTeks,
                                     ),
                                   ),
                           ),
@@ -1382,8 +1384,8 @@ class _InputBarState extends State<InputBar> {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
       decoration: const BoxDecoration(
-        color: Color(0xFF0D0D0D),
-        border: Border(top: BorderSide(color: Color(0xFF1A1A1A))),
+        color: BatikColors.putih,
+        border: Border(top: BorderSide(color: BatikColors.garis)),
       ),
       child: isMobile
           ? _MobileInputLayout(
@@ -1517,7 +1519,7 @@ class _MobileInputLayout extends StatelessWidget {
           height: 20,
           child: CircularProgressIndicator(
             strokeWidth: 2,
-            color: Color(0xFF16DB65),
+            color: BatikColors.marun,
           ),
         ),
       ),
@@ -1535,7 +1537,7 @@ class _MobileInputLayout extends StatelessWidget {
             child: Container(
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFF2A2A2A)),
+                border: Border.all(color: BatikColors.garis),
               ),
               child: Stack(
                 children: [
@@ -1556,7 +1558,7 @@ class _MobileInputLayout extends StatelessWidget {
                       child: Container(
                         padding: const EdgeInsets.all(4),
                         decoration: const BoxDecoration(
-                          color: Colors.black87,
+                          color: BatikColors.sogaGelap,
                           shape: BoxShape.circle,
                         ),
                         child: const Icon(Icons.close, size: 14, color: Colors.white),
@@ -1578,7 +1580,9 @@ class _MobileInputLayout extends StatelessWidget {
                 child: ElevatedButton(
                   onPressed: ragModeSwitching ? null : () => onShowRagModeDialog(context),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1A1A1A),
+                    backgroundColor: BatikColors.garis,
+                    disabledBackgroundColor: BatikColors.krem,
+                    side: const BorderSide(color: BatikColors.garis),
                     padding: const EdgeInsets.symmetric(vertical: 10),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -1591,7 +1595,7 @@ class _MobileInputLayout extends StatelessWidget {
                           height: 14,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            color: Color(0xFFFFAA33),
+                            color: BatikColors.sogaMuda,
                           ),
                         )
                       : Row(
@@ -1603,19 +1607,19 @@ class _MobileInputLayout extends StatelessWidget {
                                   : Icons.speed_rounded,
                               size: 15,
                               color: ragMode == 'improved' 
-                                  ? const Color(0xFF16DB65) 
-                                  : const Color(0xFFFFAA33),
+                                  ? BatikColors.marun 
+                                  : BatikColors.sogaMuda,
                             ),
                             const SizedBox(width: 5),
                             Flexible(
                               child: Text(
                                 _getRagModeShortName(ragMode),
-                                style: GoogleFonts.poppins(
+                                style: GoogleFonts.nunitoSans(
                                   fontSize: 11,
                                   fontWeight: FontWeight.w500,
                                   color: ragMode == 'improved' 
-                                      ? const Color(0xFF16DB65) 
-                                      : const Color(0xFFFFAA33),
+                                      ? BatikColors.marun 
+                                      : BatikColors.sogaMuda,
                                 ),
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -1632,7 +1636,9 @@ class _MobileInputLayout extends StatelessWidget {
                 child: ElevatedButton(
                   onPressed: modelSwitching ? null : () => onShowModelDialog(context),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1A1A1A),
+                    backgroundColor: BatikColors.garis,
+                    disabledBackgroundColor: BatikColors.krem,
+                    side: const BorderSide(color: BatikColors.garis),
                     padding: const EdgeInsets.symmetric(vertical: 10),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -1645,7 +1651,7 @@ class _MobileInputLayout extends StatelessWidget {
                           height: 14,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            color: Color(0xFF16DB65),
+                            color: BatikColors.marun,
                           ),
                         )
                       : Row(
@@ -1654,16 +1660,16 @@ class _MobileInputLayout extends StatelessWidget {
                             const Icon(
                               Icons.auto_awesome_rounded,
                               size: 15,
-                              color: Color(0xFF16DB65),
+                              color: BatikColors.marun,
                             ),
                             const SizedBox(width: 5),
                             Flexible(
                               child: Text(
                                 _getModelShortName(activeModelId),
-                                style: GoogleFonts.poppins(
+                                style: GoogleFonts.nunitoSans(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w500,
-                                  color: const Color(0xFF16DB65),
+                                  color: BatikColors.marun,
                                 ),
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -1680,7 +1686,9 @@ class _MobileInputLayout extends StatelessWidget {
                 child: ElevatedButton(
                   onPressed: sending ? null : onPickImage,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1A1A1A),
+                    backgroundColor: BatikColors.garis,
+                    disabledBackgroundColor: BatikColors.krem,
+                    side: const BorderSide(color: BatikColors.garis),
                     padding: const EdgeInsets.symmetric(vertical: 10),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -1692,15 +1700,15 @@ class _MobileInputLayout extends StatelessWidget {
                     children: [
                       const Icon(
                         Icons.image_outlined,
-                        color: Color(0xFF888888),
+                        color: BatikColors.sogaMuda,
                         size: 18,
                       ),
                       const SizedBox(width: 5),
                       Text(
                         'Foto',
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 11,
-                          color: const Color(0xFF888888),
+                          color: BatikColors.sogaMuda,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -1721,42 +1729,42 @@ class _MobileInputLayout extends StatelessWidget {
             keyboardType: TextInputType.multiline,
             textInputAction: TextInputAction.send,
             enabled: !sending && !modelSwitching,
-            style: GoogleFonts.poppins(
+            style: GoogleFonts.nunitoSans(
               fontSize: 15,
-              color: Colors.white,
+              color: BatikColors.sogaGelap,
               height: 1.5,
             ),
-            cursorColor: const Color(0xFF16DB65),
+            cursorColor: BatikColors.marun,
             decoration: InputDecoration(
               hintText: 'Ketik pertanyaan Anda...',
-              hintStyle: GoogleFonts.poppins(
+              hintStyle: GoogleFonts.nunitoSans(
                 fontSize: 14,
-                color: const Color(0xFFA3A3A3),
+                color: BatikColors.abuTeks,
               ),
               filled: true,
-              fillColor: const Color(0xFF111111),
+              fillColor: BatikColors.kertas,
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 16,
                 vertical: 16,
               ),
               border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(14),
-                borderSide: const BorderSide(color: Color(0xFF1A1A1A)),
+                borderRadius: BorderRadius.circular(24),
+                borderSide: const BorderSide(color: BatikColors.garis),
               ),
               enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(14),
-                borderSide: const BorderSide(color: Color(0xFF1A1A1A)),
+                borderRadius: BorderRadius.circular(24),
+                borderSide: const BorderSide(color: BatikColors.garis),
               ),
               focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(14),
+                borderRadius: BorderRadius.circular(24),
                 borderSide: const BorderSide(
-                  color: Color(0xFF16DB65),
+                  color: BatikColors.marun,
                   width: 1.5,
                 ),
               ),
               disabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(14),
-                borderSide: const BorderSide(color: Color(0xFF1A1A1A)),
+                borderRadius: BorderRadius.circular(24),
+                borderSide: const BorderSide(color: BatikColors.garis),
               ),
             ),
             onSubmitted: (_) {
@@ -1775,7 +1783,9 @@ class _MobileInputLayout extends StatelessWidget {
                 child: ElevatedButton(
                   onPressed: sending ? null : () => onShowUploadDialog(context),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1A1A1A),
+                    backgroundColor: BatikColors.garis,
+                    disabledBackgroundColor: BatikColors.krem,
+                    side: const BorderSide(color: BatikColors.garis),
                     padding: const EdgeInsets.symmetric(vertical: 10),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -1787,15 +1797,15 @@ class _MobileInputLayout extends StatelessWidget {
                     children: [
                       const Icon(
                         Icons.upload_file_rounded,
-                        color: Color(0xFF888888),
+                        color: BatikColors.sogaMuda,
                         size: 18,
                       ),
                       const SizedBox(width: 5),
                       Text(
                         'Upload PDF',
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 11,
-                          color: const Color(0xFF888888),
+                          color: BatikColors.sogaMuda,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -1814,8 +1824,10 @@ class _MobileInputLayout extends StatelessWidget {
                       : null,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: isListening
-                        ? Colors.red.shade400
-                        : const Color(0xFF1A1A1A),
+                        ? BatikColors.marun
+                        : BatikColors.garis,
+                        disabledBackgroundColor: BatikColors.krem,
+                        side: const BorderSide(color: BatikColors.garis),
                     padding: const EdgeInsets.symmetric(vertical: 10),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -1827,15 +1839,15 @@ class _MobileInputLayout extends StatelessWidget {
                     children: [
                       Icon(
                         isListening ? Icons.mic_off_rounded : Icons.mic_none_rounded,
-                        color: isListening ? Colors.white : const Color(0xFF888888),
+                        color: isListening ? Colors.white : BatikColors.sogaMuda,
                         size: 18,
                       ),
                       const SizedBox(width: 5),
                       Text(
                         isListening ? 'Stop' : 'Suara',
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 11,
-                          color: isListening ? Colors.white : const Color(0xFF888888),
+                          color: isListening ? Colors.white : BatikColors.sogaMuda,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -1852,7 +1864,7 @@ class _MobileInputLayout extends StatelessWidget {
                       child: ElevatedButton(
                         onPressed: onStop,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFFF4444),
+                          backgroundColor: BatikColors.marunGelap,
                           padding: const EdgeInsets.symmetric(vertical: 10),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12),
@@ -1870,7 +1882,7 @@ class _MobileInputLayout extends StatelessWidget {
                             const SizedBox(width: 5),
                             Text(
                               'Stop',
-                              style: GoogleFonts.poppins(
+                              style: GoogleFonts.nunitoSans(
                                 fontSize: 11,
                                 color: Colors.white,
                                 fontWeight: FontWeight.w500,
@@ -1884,8 +1896,9 @@ class _MobileInputLayout extends StatelessWidget {
                       onPressed: isSendDisabled ? null : onSend,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: (hasText || selectedImageBytes != null) && !sending && !modelSwitching
-                            ? const Color(0xFF16DB65)
-                            : const Color(0xFF1A1A1A),
+                            ? BatikColors.marun
+                            : BatikColors.krem,
+                        disabledBackgroundColor: BatikColors.krem,
                         padding: const EdgeInsets.symmetric(vertical: 10),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
@@ -1898,24 +1911,24 @@ class _MobileInputLayout extends StatelessWidget {
                               height: 16,
                               child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                color: Colors.black,
+                                color: BatikColors.marun,
                               ),
                             )
                           : Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                const Icon(
+                                Icon(
                                   Icons.arrow_upward_rounded,
-                                  color: Colors.black,
+                                  color: isSendDisabled ? BatikColors.abuTeks : Colors.white,
                                   size: 18,
                                 ),
                                 const SizedBox(width: 5),
                                 Text(
                                   'Kirim',
-                                  style: GoogleFonts.poppins(
+                                  style: GoogleFonts.nunitoSans(
                                     fontSize: 11,
                                     fontWeight: FontWeight.w600,
-                                    color: Colors.black,
+                                    color: isSendDisabled ? BatikColors.abuTeks : Colors.white,
                                   ),
                                 ),
                               ],
@@ -2004,7 +2017,7 @@ class _DesktopInputLayout extends StatelessWidget {
             height: 20,
             child: CircularProgressIndicator(
               strokeWidth: 2,
-              color: Color(0xFF16DB65),
+              color: BatikColors.marun,
             ),
           ),
         ),
@@ -2021,7 +2034,7 @@ class _DesktopInputLayout extends StatelessWidget {
             margin: const EdgeInsets.only(bottom: 12),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0xFF2A2A2A)),
+              border: Border.all(color: BatikColors.garis),
             ),
             child: Stack(
               children: [
@@ -2042,7 +2055,7 @@ class _DesktopInputLayout extends StatelessWidget {
                     child: Container(
                       padding: const EdgeInsets.all(4),
                       decoration: const BoxDecoration(
-                        color: Colors.black87,
+                        color: BatikColors.sogaGelap,
                         shape: BoxShape.circle,
                       ),
                       child: const Icon(Icons.close, size: 14, color: Colors.white),
@@ -2066,7 +2079,9 @@ class _DesktopInputLayout extends StatelessWidget {
                   child: ElevatedButton(
                     onPressed: () => onShowUploadDialog(context),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF1A1A1A),
+                      backgroundColor: BatikColors.garis,
+                      disabledBackgroundColor: BatikColors.krem,
+                      side: const BorderSide(color: BatikColors.garis),
                       padding: EdgeInsets.zero,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -2075,7 +2090,7 @@ class _DesktopInputLayout extends StatelessWidget {
                     ),
                     child: const Icon(
                       Icons.upload_file_rounded,
-                      color: Color(0xFF888888),
+                      color: BatikColors.sogaMuda,
                       size: 20,
                     ),
                   ),
@@ -2093,7 +2108,9 @@ class _DesktopInputLayout extends StatelessWidget {
                 child: ElevatedButton(
                   onPressed: ragModeSwitching ? null : () => onShowRagModeDialog(context),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1A1A1A),
+                    backgroundColor: BatikColors.garis,
+                    disabledBackgroundColor: BatikColors.krem,
+                    side: const BorderSide(color: BatikColors.garis),
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -2106,7 +2123,7 @@ class _DesktopInputLayout extends StatelessWidget {
                           height: 14,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            color: Color(0xFFFFAA33),
+                            color: BatikColors.sogaMuda,
                           ),
                         )
                       : Row(
@@ -2118,18 +2135,18 @@ class _DesktopInputLayout extends StatelessWidget {
                                   : Icons.speed_rounded,
                               size: 15,
                               color: ragMode == 'improved' 
-                                  ? const Color(0xFF16DB65) 
-                                  : const Color(0xFFFFAA33),
+                                  ? BatikColors.marun 
+                                  : BatikColors.sogaMuda,
                             ),
                             const SizedBox(width: 5),
                             Text(
                               _getRagModeShortName(ragMode),
-                              style: GoogleFonts.poppins(
+                              style: GoogleFonts.nunitoSans(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w500,
                                 color: ragMode == 'improved' 
-                                    ? const Color(0xFF16DB65) 
-                                    : const Color(0xFFFFAA33),
+                                    ? BatikColors.marun 
+                                    : BatikColors.sogaMuda,
                               ),
                             ),
                           ],
@@ -2146,7 +2163,9 @@ class _DesktopInputLayout extends StatelessWidget {
                 child: ElevatedButton(
                   onPressed: modelSwitching ? null : () => onShowModelDialog(context),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1A1A1A),
+                    backgroundColor: BatikColors.garis,
+                    disabledBackgroundColor: BatikColors.krem,
+                    side: const BorderSide(color: BatikColors.garis),
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -2159,7 +2178,7 @@ class _DesktopInputLayout extends StatelessWidget {
                           height: 14,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            color: Color(0xFF16DB65),
+                            color: BatikColors.marun,
                           ),
                         )
                       : Row(
@@ -2168,15 +2187,15 @@ class _DesktopInputLayout extends StatelessWidget {
                             const Icon(
                               Icons.auto_awesome_rounded,
                               size: 15,
-                              color: Color(0xFF16DB65),
+                              color: BatikColors.marun,
                             ),
                             const SizedBox(width: 5),
                             Text(
                               _getModelShortName(activeModelId),
-                              style: GoogleFonts.poppins(
+                              style: GoogleFonts.nunitoSans(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w500,
-                                color: const Color(0xFF16DB65),
+                                color: BatikColors.marun,
                               ),
                             ),
                           ],
@@ -2196,7 +2215,9 @@ class _DesktopInputLayout extends StatelessWidget {
                   child: ElevatedButton(
                     onPressed: sending ? null : onPickImage,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF1A1A1A),
+                      backgroundColor: BatikColors.garis,
+                      disabledBackgroundColor: BatikColors.krem,
+                      side: const BorderSide(color: BatikColors.garis),
                       padding: EdgeInsets.zero,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -2205,7 +2226,7 @@ class _DesktopInputLayout extends StatelessWidget {
                     ),
                     child: const Icon(
                       Icons.image_outlined,
-                      color: Color(0xFF888888),
+                      color: BatikColors.sogaMuda,
                       size: 20,
                     ),
                   ),
@@ -2240,41 +2261,41 @@ class _DesktopInputLayout extends StatelessWidget {
                       keyboardType: TextInputType.multiline,
                       textInputAction: TextInputAction.send,
                       enabled: !sending && !modelSwitching,
-                      style: GoogleFonts.poppins(
+                      style: GoogleFonts.nunitoSans(
                         fontSize: 14,
-                        color: Colors.white,
+                        color: BatikColors.sogaGelap,
                       ),
-                      cursorColor: const Color(0xFF16DB65),
+                      cursorColor: BatikColors.marun,
                       decoration: InputDecoration(
                         hintText: 'Ketik pertanyaan Anda...',
-                        hintStyle: GoogleFonts.poppins(
+                        hintStyle: GoogleFonts.nunitoSans(
                           fontSize: 14,
-                          color: const Color(0xFFA3A3A3),
+                          color: BatikColors.abuTeks,
                         ),
                         filled: true,
-                        fillColor: const Color(0xFF111111),
+                        fillColor: BatikColors.kertas,
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 16,
                           vertical: 12,
                         ),
                         border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: const BorderSide(color: Color(0xFF1A1A1A)),
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: const BorderSide(color: BatikColors.garis),
                         ),
                         enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: const BorderSide(color: Color(0xFF1A1A1A)),
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: const BorderSide(color: BatikColors.garis),
                         ),
                         focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
+                          borderRadius: BorderRadius.circular(24),
                           borderSide: const BorderSide(
-                            color: Color(0xFF16DB65),
+                            color: BatikColors.marun,
                             width: 1.5,
                           ),
                         ),
                         disabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: const BorderSide(color: Color(0xFF1A1A1A)),
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: const BorderSide(color: BatikColors.garis),
                         ),
                       ),
                       onSubmitted: (_) {
@@ -2302,8 +2323,10 @@ class _DesktopInputLayout extends StatelessWidget {
                         : null,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: isListening
-                          ? Colors.red.shade400
-                          : const Color(0xFF1A1A1A),
+                          ? BatikColors.marun
+                          : BatikColors.garis,
+                          disabledBackgroundColor: BatikColors.krem,
+                          side: const BorderSide(color: BatikColors.garis),
                       padding: EdgeInsets.zero,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -2312,7 +2335,7 @@ class _DesktopInputLayout extends StatelessWidget {
                     ),
                     child: Icon(
                       isListening ? Icons.mic_off_rounded : Icons.mic_none_rounded,
-                      color: isListening ? Colors.white : const Color(0xFF888888),
+                      color: isListening ? Colors.white : BatikColors.sogaMuda,
                       size: 20,
                     ),
                   ),
@@ -2330,7 +2353,7 @@ class _DesktopInputLayout extends StatelessWidget {
                       child: ElevatedButton(
                         onPressed: onStop,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFFF4444),
+                          backgroundColor: BatikColors.marunGelap,
                           padding: EdgeInsets.zero,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12),
@@ -2348,8 +2371,9 @@ class _DesktopInputLayout extends StatelessWidget {
                       onPressed: isSendDisabled ? null : onSend,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: (hasText || selectedImageBytes != null) && !sending && !modelSwitching
-                            ? const Color(0xFF16DB65)
-                            : const Color(0xFF1A1A1A),
+                            ? BatikColors.marun
+                            : BatikColors.krem,
+                        disabledBackgroundColor: BatikColors.krem,
                         padding: EdgeInsets.zero,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
@@ -2362,12 +2386,12 @@ class _DesktopInputLayout extends StatelessWidget {
                               height: 18,
                               child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                color: Colors.black,
+                                color: BatikColors.marun,
                               ),
                             )
-                          : const Icon(
+                          : Icon(
                               Icons.arrow_upward_rounded,
-                              color: Colors.black,
+                              color: isSendDisabled ? BatikColors.abuTeks : Colors.white,
                               size: 20,
                             ),
                     ),

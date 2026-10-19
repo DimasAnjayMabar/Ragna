@@ -1,19 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:frontend/chats/service_chats.dart';
+import 'package:frontend/chats/batik_theme.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 // ---------------------------------------------------------------------------
-// Konstanta Warna (shared)
+// Konstanta Warna — dipetakan dari palet batik
 // ---------------------------------------------------------------------------
 
-const kChatBg         = Color(0xFF020202);
-const kChatNeon       = Color(0xFF16DB65);
-const kChatNeonDim    = Color(0x3316DB65);
-const kChatSurface    = Color(0xFF0D0D0D);
-const kChatSurfaceAlt = Color(0xFF111111);
-const kChatBorder     = Color(0xFF1A1A1A);
-const kChatTextMuted  = Color(0xFFA3A3A3);
+const kChatBg         = BatikColors.kertas;
+const kChatNeon       = BatikColors.marun;        // aksen utama
+const kChatNeonDim    = Color(0x268B251E);        // marun 15%
+const kChatSurface    = BatikColors.putih;
+const kChatSurfaceAlt = BatikColors.krem;
+const kChatBorder     = BatikColors.garis;
+const kChatTextMuted  = BatikColors.abuTeks;
 const kSidebarWidth   = 280.0;
 
 // ---------------------------------------------------------------------------
@@ -108,10 +109,10 @@ class ChatSidebar extends StatelessWidget {
       context: context,
       builder: (BuildContext context) {
         return Dialog(
-          backgroundColor: kChatSurface,
+          backgroundColor: BatikColors.putih,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: kChatBorder),
+            side: const BorderSide(color: BatikColors.garis),
           ),
           child: Container(
             padding: const EdgeInsets.all(20),
@@ -121,31 +122,31 @@ class ChatSidebar extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFFF4D4D).withValues(alpha: 0.1),
+                    color: BatikColors.marun.withValues(alpha: 0.1),
                     shape: BoxShape.circle,
                   ),
                   child: const Icon(
                     Icons.logout_rounded,
                     size: 32,
-                    color: Color(0xFFFF4D4D),
+                    color: BatikColors.marun,
                   ),
                 ),
                 const SizedBox(height: 16),
                 Text(
                   'Konfirmasi Keluar',
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.playfairDisplay(
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
-                    color: Colors.white,
+                    color: BatikColors.sogaGelap,
                   ),
                 ),
                 const SizedBox(height: 8),
                 Text(
                   'Apakah Anda yakin ingin keluar dari aplikasi?',
                   textAlign: TextAlign.center,
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.nunitoSans(
                     fontSize: 13,
-                    color: kChatTextMuted,
+                    color: BatikColors.abuTeks,
                   ),
                 ),
                 const SizedBox(height: 24),
@@ -155,7 +156,7 @@ class ChatSidebar extends StatelessWidget {
                       child: OutlinedButton(
                         onPressed: () => Navigator.pop(context),
                         style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: kChatBorder),
+                          side: const BorderSide(color: BatikColors.garis),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(10),
                           ),
@@ -163,10 +164,10 @@ class ChatSidebar extends StatelessWidget {
                         ),
                         child: Text(
                           'Batal',
-                          style: GoogleFonts.poppins(
+                          style: GoogleFonts.nunitoSans(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
-                            color: kChatTextMuted,
+                            color: BatikColors.abuTeks,
                           ),
                         ),
                       ),
@@ -179,7 +180,9 @@ class ChatSidebar extends StatelessWidget {
                           onLogout();
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFFF4D4D),
+                          backgroundColor: BatikColors.marun,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(10),
                           ),
@@ -187,7 +190,7 @@ class ChatSidebar extends StatelessWidget {
                         ),
                         child: Text(
                           'Keluar',
-                          style: GoogleFonts.poppins(
+                          style: GoogleFonts.nunitoSans(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
                             color: Colors.white,
@@ -224,23 +227,23 @@ class _SidebarLogo extends StatelessWidget {
             width: 32,
             height: 32,
             decoration: BoxDecoration(
-              color: kChatNeonDim,
+              color: BatikColors.marun.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: kChatNeon.withValues(alpha: 0.4)),
+              border: Border.all(color: BatikColors.marun.withValues(alpha: 0.4)),
             ),
             child: const Icon(
               Icons.account_tree_rounded,
-              color: kChatNeon,
+              color: BatikColors.marun,
               size: 18,
             ),
           ),
           const SizedBox(width: 10),
           Text(
             'Ragna',
-            style: GoogleFonts.poppins(
-              fontSize: 16,
+            style: GoogleFonts.playfairDisplay(
+              fontSize: 17,
               fontWeight: FontWeight.w700,
-              color: Colors.white,
+              color: BatikColors.sogaGelap,
               letterSpacing: 0.3,
             ),
           ),
@@ -254,12 +257,12 @@ class _SidebarLogo extends StatelessWidget {
                 padding: const EdgeInsets.all(6),
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: kChatBorder),
+                  border: Border.all(color: BatikColors.garis),
                 ),
                 child: const Icon(
                   Icons.edit_square,
                   size: 16,
-                  color: kChatTextMuted,
+                  color: BatikColors.abuTeks,
                 ),
               ),
             ),
@@ -305,14 +308,14 @@ class _TopicList extends StatelessWidget {
   Widget build(BuildContext context) {
     if (loading) {
       return const Center(
-        child: CircularProgressIndicator(color: kChatNeon, strokeWidth: 2),
+        child: CircularProgressIndicator(color: BatikColors.marun, strokeWidth: 2),
       );
     }
     if (topics.isEmpty) {
       return Center(
         child: Text(
           'Belum ada percakapan.',
-          style: GoogleFonts.poppins(fontSize: 12, color: kChatTextMuted),
+          style: GoogleFonts.nunitoSans(fontSize: 12, color: BatikColors.abuTeks),
         ),
       );
     }
@@ -342,10 +345,10 @@ class _TopicList extends StatelessWidget {
       context: context,
       builder: (BuildContext context) {
         return Dialog(
-          backgroundColor: kChatSurface,
+          backgroundColor: BatikColors.putih,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: kChatBorder),
+            side: const BorderSide(color: BatikColors.garis),
           ),
           child: Container(
             padding: const EdgeInsets.all(20),
@@ -355,40 +358,40 @@ class _TopicList extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFFF4D4D).withValues(alpha: 0.1),
+                    color: BatikColors.marun.withValues(alpha: 0.1),
                     shape: BoxShape.circle,
                   ),
                   child: const Icon(
                     Icons.delete_outline_rounded,
                     size: 32,
-                    color: Color(0xFFFF4D4D),
+                    color: BatikColors.marun,
                   ),
                 ),
                 const SizedBox(height: 16),
                 Text(
                   'Hapus Percakapan',
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.playfairDisplay(
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
-                    color: Colors.white,
+                    color: BatikColors.sogaGelap,
                   ),
                 ),
                 const SizedBox(height: 8),
                 Text(
                   'Apakah Anda yakin ingin menghapus "${topic.title}"?',
                   textAlign: TextAlign.center,
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.nunitoSans(
                     fontSize: 13,
-                    color: kChatTextMuted,
+                    color: BatikColors.abuTeks,
                   ),
                 ),
                 const SizedBox(height: 8),
                 Text(
                   'Percakapan ini akan dihapus secara permanen.',
                   textAlign: TextAlign.center,
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.nunitoSans(
                     fontSize: 11,
-                    color: kChatTextMuted,
+                    color: BatikColors.abuTeks,
                   ),
                 ),
                 const SizedBox(height: 24),
@@ -398,7 +401,7 @@ class _TopicList extends StatelessWidget {
                       child: OutlinedButton(
                         onPressed: () => Navigator.pop(context),
                         style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: kChatBorder),
+                          side: const BorderSide(color: BatikColors.garis),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(10),
                           ),
@@ -406,10 +409,10 @@ class _TopicList extends StatelessWidget {
                         ),
                         child: Text(
                           'Batal',
-                          style: GoogleFonts.poppins(
+                          style: GoogleFonts.nunitoSans(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
-                            color: kChatTextMuted,
+                            color: BatikColors.abuTeks,
                           ),
                         ),
                       ),
@@ -422,7 +425,9 @@ class _TopicList extends StatelessWidget {
                           onDelete(topic);
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFFF4D4D),
+                          backgroundColor: BatikColors.marun,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(10),
                           ),
@@ -430,7 +435,7 @@ class _TopicList extends StatelessWidget {
                         ),
                         child: Text(
                           'Hapus',
-                          style: GoogleFonts.poppins(
+                          style: GoogleFonts.nunitoSans(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
                             color: Colors.white,
@@ -519,14 +524,14 @@ class _TopicTileState extends State<_TopicTile> {
         margin: const EdgeInsets.only(bottom: 2),
         decoration: BoxDecoration(
           color: widget.isActive
-              ? kChatNeonDim
+              ? BatikColors.marun.withValues(alpha: 0.08)
               : _hovering
-                  ? Colors.white.withValues(alpha: 0.04)
+                  ? BatikColors.krem
                   : Colors.transparent,
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: widget.isActive
-                ? kChatNeon.withValues(alpha: 0.3)
+                ? BatikColors.marun.withValues(alpha: 0.3)
                 : Colors.transparent,
           ),
         ),
@@ -546,7 +551,7 @@ class _TopicTileState extends State<_TopicTile> {
             Icon(
               Icons.chat_bubble_outline_rounded,
               size: 14,
-              color: widget.isActive ? kChatNeon : kChatTextMuted,
+              color: widget.isActive ? BatikColors.marun : BatikColors.abuTeks,
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -554,24 +559,25 @@ class _TopicTileState extends State<_TopicTile> {
                 widget.topic.title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: GoogleFonts.poppins(
+                style: GoogleFonts.nunitoSans(
                   fontSize: 13,
-                  color: widget.isActive ? kChatNeon : Colors.white70,
+                  color: widget.isActive
+                      ? BatikColors.marun
+                      : BatikColors.sogaGelap,
                   fontWeight: widget.isActive
-                      ? FontWeight.w600
+                      ? FontWeight.w700
                       : FontWeight.w400,
                 ),
               ),
             ),
-            // Always show 3 dots menu button
             PopupMenuButton<String>(
-              icon: const Icon(Icons.more_vert, size: 16, color: kChatTextMuted),
+              icon: const Icon(Icons.more_vert, size: 16, color: BatikColors.abuTeks),
               tooltip: "",
               offset: const Offset(0, 20),
-              color: kChatSurfaceAlt,
+              color: BatikColors.putih,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(8),
-                side: const BorderSide(color: kChatBorder),
+                side: const BorderSide(color: BatikColors.garis),
               ),
               onSelected: (value) {
                 if (value == 'rename') {
@@ -586,14 +592,14 @@ class _TopicTileState extends State<_TopicTile> {
                   height: 36,
                   child: Row(
                     children: [
-                      Icon(Icons.drive_file_rename_outline_rounded, 
-                           size: 16, color: kChatNeon),
+                      const Icon(Icons.drive_file_rename_outline_rounded,
+                           size: 16, color: BatikColors.soga),
                       const SizedBox(width: 8),
                       Text(
                         'Ganti nama',
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 12,
-                          color: Colors.white70,
+                          color: BatikColors.sogaGelap,
                         ),
                       ),
                     ],
@@ -604,14 +610,14 @@ class _TopicTileState extends State<_TopicTile> {
                   height: 36,
                   child: Row(
                     children: [
-                      Icon(Icons.delete_outline_rounded, 
-                           size: 16, color: const Color(0xFFFF4D4D)),
+                      const Icon(Icons.delete_outline_rounded,
+                           size: 16, color: BatikColors.marun),
                       const SizedBox(width: 8),
                       Text(
                         'Hapus',
-                        style: GoogleFonts.poppins(
+                        style: GoogleFonts.nunitoSans(
                           fontSize: 12,
-                          color: Colors.white70,
+                          color: BatikColors.sogaGelap,
                         ),
                       ),
                     ],
@@ -630,14 +636,14 @@ class _TopicTileState extends State<_TopicTile> {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       child: Row(
         children: [
-          const Icon(Icons.edit_rounded, size: 14, color: kChatNeon),
+          const Icon(Icons.edit_rounded, size: 14, color: BatikColors.marun),
           const SizedBox(width: 8),
           Expanded(
             child: TextField(
               controller : _renameCtrl,
               autofocus  : true,
-              style: GoogleFonts.poppins(fontSize: 13, color: Colors.white),
-              cursorColor: kChatNeon,
+              style: GoogleFonts.nunitoSans(fontSize: 13, color: BatikColors.sogaGelap),
+              cursorColor: BatikColors.marun,
               decoration : const InputDecoration(
                 border: InputBorder.none,
                 isDense: true,
@@ -651,14 +657,14 @@ class _TopicTileState extends State<_TopicTile> {
           InkWell(
             onTap: () => widget.onConfirmRename(_renameCtrl.text),
             borderRadius: BorderRadius.circular(4),
-            child: const Icon(Icons.check_rounded, size: 16, color: kChatNeon),
+            child: const Icon(Icons.check_rounded, size: 16, color: BatikColors.hijau),
           ),
           const SizedBox(width: 4),
           InkWell(
             onTap: widget.onCancelRename,
             borderRadius: BorderRadius.circular(4),
             child: const Icon(Icons.close_rounded,
-                size: 16, color: kChatTextMuted),
+                size: 16, color: BatikColors.abuTeks),
           ),
         ],
       ),
@@ -699,12 +705,14 @@ class _ProfileCardState extends State<_ProfileCard> {
           duration: const Duration(milliseconds: 150),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
-            color: _hovering ? kChatNeonDim : kChatSurfaceAlt,
+            color: _hovering
+                ? BatikColors.marun.withValues(alpha: 0.06)
+                : BatikColors.krem,
             borderRadius: BorderRadius.circular(14),
             border: Border.all(
               color: _hovering
-                  ? kChatNeon.withValues(alpha: 0.4)
-                  : kChatBorder,
+                  ? BatikColors.marun.withValues(alpha: 0.4)
+                  : BatikColors.garis,
             ),
           ),
           child: Row(
@@ -713,16 +721,16 @@ class _ProfileCardState extends State<_ProfileCard> {
                 width: 36, height: 36,
                 decoration: BoxDecoration(
                   shape : BoxShape.circle,
-                  color : kChatNeonDim,
-                  border: Border.all(color: kChatNeon.withValues(alpha: 0.5)),
+                  color : BatikColors.marun.withValues(alpha: 0.12),
+                  border: Border.all(color: BatikColors.marun.withValues(alpha: 0.5)),
                 ),
                 alignment: Alignment.center,
                 child: Text(
                   initials,
-                  style: GoogleFonts.poppins(
+                  style: GoogleFonts.nunitoSans(
                     fontSize: 13,
                     fontWeight: FontWeight.w700,
-                    color: kChatNeon,
+                    color: BatikColors.marun,
                   ),
                 ),
               ),
@@ -735,24 +743,24 @@ class _ProfileCardState extends State<_ProfileCard> {
                       name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.poppins(
+                      style: GoogleFonts.nunitoSans(
                         fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                        color: BatikColors.sogaGelap,
                       ),
                     ),
                     Text(
                       email,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.poppins(
-                          fontSize: 11, color: kChatTextMuted),
+                      style: GoogleFonts.nunitoSans(
+                          fontSize: 11, color: BatikColors.abuTeks),
                     ),
                   ],
                 ),
               ),
               const Icon(Icons.chevron_right_rounded,
-                  size: 18, color: kChatTextMuted),
+                  size: 18, color: BatikColors.abuTeks),
             ],
           ),
         ),
@@ -777,20 +785,20 @@ class _LogoutButton extends StatelessWidget {
       child: OutlinedButton.icon(
         onPressed: onPressed,
         icon : const Icon(Icons.logout_rounded,
-            size: 16, color: Color(0xFFFF4D4D)),
+            size: 16, color: BatikColors.marun),
         label: Text(
           'Keluar',
-          style: GoogleFonts.poppins(
+          style: GoogleFonts.nunitoSans(
             fontSize: 13,
             fontWeight: FontWeight.w600,
-            color: const Color(0xFFFF4D4D),
+            color: BatikColors.marun,
           ),
         ),
         style: OutlinedButton.styleFrom(
-          side: const BorderSide(color: Color(0xFFFF4D4D), width: 1),
+          side: const BorderSide(color: BatikColors.marun, width: 1),
           shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(10)),
-          backgroundColor: const Color(0xFFFF4D4D).withValues(alpha: 0.06),
+          backgroundColor: BatikColors.marun.withValues(alpha: 0.06),
         ),
       ),
     );
